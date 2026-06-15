@@ -1,0 +1,3 @@
+dataset,method,qps,recall
+sift1m,hnsw,1050.5,0.92
+sift1m,hnsw_oversampling,1188.3,0.94

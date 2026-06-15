@@ -1,0 +1,49 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+.env
+.DS_Store
+.r2a/
+.idea/
+
+# R2A local runtime / workspaces / cache
+runtime/
+.r2a_runtime/
+R2A_WORKSPACES/
+*_WORKSPACES/
+R2A_CACHE/
+cache/
+logs/
+
+# R2A local settings / secrets
+web_settings.json
+.r2a/web_settings.json
+*.local.json
+*.local.yaml
+*.local.yml
+
+# Run outputs
+stdout.txt
+stderr.txt
+summary.txt
+*.log
+
+# Local agent / gateway configs
+.openclaw/
+claude-router/
+router_config*
+gateway*.log
+
+# Local archives / backups if accidentally created inside repo
+R2A_BACKUPS/
+R2A_ARCHIVE_PRE_GITHUB*/

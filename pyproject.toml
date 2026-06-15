@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "r2a"
+version = "0.1.0"
+description = "R2A: Research Reproduction Agent workflow skeleton"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "R2A Contributors" }
+]
+dependencies = [
+  "langgraph>=0.2.0",
+  "langchain-core>=0.3.0",
+  "typer>=0.12.0",
+  "pandas>=2.0.0",
+  "PyMuPDF>=1.24.0",
+  "pypdf>=5.0.0",
+  "rich>=13.0.0",
+  "pydantic>=2.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "streamlit>=1.32.0"
+]
+
+[project.scripts]
+r2a = "r2a.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["r2a*"]
+
+[tool.setuptools.package-data]
+r2a = ["templates/*.md", "prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

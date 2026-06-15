@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "iteration": {{iteration}},
+  "verdict": "{{verdict}}",
+  "should_iterate": false,
+  "next_planner_mode": "none",
+  "current_level": "",
+  "next_level": "",
+  "max_evidence_level_allowed": "",
+  "claim_allowed": "",
+  "execution_status": "initialized",
+  "failure_categories": [],
+  "missing_l3_requirements": [],
+  "missing_l4_alignment": [],
+  "l4_alignment_status": "not_achieved",
+  "l4_alignment_summary_path": "",
+  "preserve_successful_steps": [],
+  "required_fixes": [],
+  "forbidden_next_actions": [],
+  "recommended_task_scope": [],
+  "suggested_next_action": "{{suggested_next_action}}",
+  "evidence": {
+    "check_report_path": "{{check_report_path}}",
+    "execution_report_path": "{{execution_report_path}}",
+    "review_report_path": ""
+  }
+}
