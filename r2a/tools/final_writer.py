@@ -25,39 +25,188 @@ def build_template_final_narrative_cn(context: dict[str, Any]) -> str:
     stop_reason = _text(final_decision.get("stop_reason"), "unknown")
     warnings = _list(context.get("warnings"))
     limitations = _list(context.get("limitations"))
+    reduced_metrics_summary = _text(context.get("reduced_metrics_summary"), "- 未找到 `reduced_metrics.csv`。")
+    paper_alignment_summary = _text(context.get("paper_alignment_summary"), "- 未找到 `paper_alignment.csv`。")
+    l4_alignment_excerpt = _text(context.get("l4_alignment_excerpt"), "- 未找到 `L4_ALIGNMENT_SUMMARY.md`。")
+    command_manifest_summary = _text(context.get("command_manifest_summary"), "- 未找到 `command_manifest.csv`。")
     return "\n".join(
         [
-            "# FINAL_NARRATIVE_CN",
+            "# 最终复现报告摘要",
             "",
-            "本节是 Final Writer 根据结构化判定和 artifacts 生成的中文叙述。正式判定以 `FINAL_DECISION.json` 为准；Final Writer 不重新判断 verdict，不修改 accepted_level、observed_level 或 target_reached。",
+            "本摘要由 Final Writer 根据结构化 artifacts 整理生成。正式判定以 `FINAL_DECISION.json` 为准；Final Writer 不重新判断 verdict，不修改 accepted_level、observed_level 或 target_reached。",
             "",
-            "## 最终结论",
+            "## 1. 论文与任务概览",
             "",
-            f"- 正式 verdict: `{formal_verdict}`",
-            f"- Accepted level: `{accepted_level}`",
-            f"- Observed level: `{observed_level}`",
-            f"- Target level: `{target_level}`",
-            f"- Target reached: `{target_reached}`",
-            f"- Final status: `{final_status}`",
-            f"- Stop reason: `{stop_reason}`",
+            "本次报告面向一篇论文复现任务：论文研究问题、核心方法、benchmark 目标、官方源码与数据来源均应以已落盘的论文与源码证据文件为准，报告层不补写未记录的论文结论或实验数字。",
+            f"本次目标等级记录为 `{target_level}`，正式等级字段仍来自 `FINAL_DECISION.json`。",
             "",
-            "## 复现证据摘要",
+            "（证据文件：PAPER_CONTEXT.md、PAPER_REPRODUCTION_CARD.md、SOURCE_ACQUISITION.json）",
             "",
-            _text(context.get("reduced_metrics_summary"), "- reduced_metrics.csv not present."),
+            "## 2. 本次运行做了什么",
             "",
-            _text(context.get("paper_alignment_summary"), "- paper_alignment.csv not present."),
+            "本次 workflow 的可审计产物按阶段组织：Paper 解析生成论文上下文，源码识别记录候选与选中来源，Planner 生成任务与实验契约，Engineer 在有界范围内执行实验并记录结果，Reviewer / EvidenceDecision / FinalDecision 负责正式判级与终态汇总。若某阶段未运行或被跳过，结构化 diagnostics 和 `RUN_MANIFEST.json` 会保留对应状态。",
             "",
-            _text(context.get("l4_alignment_excerpt"), "- L4_ALIGNMENT_SUMMARY.md not present."),
+            "（证据文件：RUN_MANIFEST.json、ITERATION_STATE.json、TASK_SPEC.md、EXPERIMENT_CONTRACT.md、EXECUTION_REPORT.md、REVIEW_REPORT.md、FINAL_DECISION.json）",
             "",
-            _text(context.get("command_manifest_summary"), "- command_manifest.csv not present."),
+            "## 3. 实验范围与当前状态",
             "",
-            "## 局限性与后续动作",
+            "本次报告不声明 full reproduction。它只陈述结构化 evidence 已正式接受或已观察到的范围；是否属于 official reduced / L4 reduced paper-aligned 以 `accepted_level`、`observed_level` 和 evidence artifacts 为准。",
             "",
-            _bullet(warnings or ["None"]),
+            f"- final_status: `{final_status}`",
+            f"- formal_verdict: `{formal_verdict}`",
+            f"- accepted_level: `{accepted_level}`",
+            f"- observed_level: `{observed_level}`",
+            f"- target_level: `{target_level}`",
+            f"- target_reached: `{target_reached}`",
+            f"- stop_reason: `{stop_reason}`",
             "",
-            _bullet(limitations or ["No additional limitations recorded."]),
+            "源码、数据集和方法名称不由 Final Writer 自由补写；请以 `SOURCE_ACQUISITION.json`、`input_contract_verification.csv` 和 `reduced_metrics.csv` 中的结构化字段为准。若当前等级不是 L5/L6，原因通常是没有正式接受完整数据规模、多次重复实验、完整 baseline 覆盖或 full/near-full reproduction 证据。",
+            "",
+            "（证据文件：SOURCE_ACQUISITION.json、input_contract_verification.csv、reduced_metrics.csv、paper_alignment.csv、FINAL_DECISION.json）",
+            "",
+            "## 4. 实验结果摘要",
+            "",
+            _reduced_metrics_table(reduced_metrics_summary),
+            "",
+            "以上表格只整理 `reduced_metrics.csv` 或既有 summary 中出现的字段；没有结构化来源的数字不会被补写。",
+            "",
+            "## 5. 论文对齐情况",
+            "",
+            _paper_alignment_table(paper_alignment_summary),
+            "",
+            "`L4_ALIGNMENT_SUMMARY.md` 是 L4 对齐证据包，用于帮助理解 reduced run 与论文设置的匹配情况；它不替代 Reviewer verdict，也不重新判级。",
+            "",
+            l4_alignment_excerpt,
+            "",
+            "## 6. 最终结论",
+            "",
+            _final_conclusion(
+                formal_verdict=formal_verdict,
+                accepted_level=accepted_level,
+                observed_level=observed_level,
+                target_level=target_level,
+                target_reached=target_reached,
+            ),
+            "",
+            "证据文件：REVIEW_VERDICT.json、EVIDENCE_DECISION.json、FINAL_DECISION.json。",
+            "",
+            "## 7. 推荐查看文件",
+            "",
+            "1. FINAL_REPORT.md",
+            "2. FINAL_NARRATIVE_CN.md",
+            "3. L4_ALIGNMENT_SUMMARY.md",
+            "4. REVIEW_REPORT.md",
+            "5. paper_alignment.csv",
+            "6. reduced_metrics.csv",
+            "7. command_manifest.csv",
+            "8. SOURCE_ACQUISITION.json",
+            "9. PAPER_CONTEXT.md / PAPER_REPRODUCTION_CARD.md",
+            "",
+            "## 附：命令与局限性提示",
+            "",
+            command_manifest_summary,
+            "",
+            "### 当前警告",
+            "",
+            _bullet(warnings or ["无"]),
+            "",
+            "### 局限性与后续动作",
+            "",
+            _bullet(limitations or ["未记录额外局限性。"]),
         ]
     )
+
+
+def _reduced_metrics_table(summary: str) -> str:
+    rows = _summary_fields(summary)
+    methods = rows.get("methods", "见 reduced_metrics.csv")
+    datasets = rows.get("datasets", "见 reduced_metrics.csv")
+    metrics = rows.get("metrics", "见 reduced_metrics.csv")
+    result = rows.get("reduced_metrics_rows", "")
+    command_manifest = rows.get("command_manifest.csv present", "")
+    key_result = f"reduced_metrics_rows: {result}" if result else "见结构化 reduced metrics summary"
+    if command_manifest:
+        key_result = f"{key_result}; command_manifest.csv present: {command_manifest}"
+    return "\n".join(
+        [
+            "| 方法 | 数据集 | 指标 | 关键结果 | 证据文件 |",
+            "| --- | --- | --- | --- | --- |",
+            f"| {_cell(methods)} | {_cell(datasets)} | {_cell(metrics)} | {_cell(key_result)} | reduced_metrics.csv、command_manifest.csv |",
+        ]
+    )
+
+
+def _paper_alignment_table(summary: str) -> str:
+    counts = _alignment_counts(summary)
+    meanings = {
+        "MATCH": "与论文设置匹配",
+        "PARTIAL_MATCH": "与论文设置部分匹配",
+        "MISMATCH": "与论文设置不匹配",
+        "NOT_AVAILABLE": "论文或本次 artifacts 中缺少可比信息",
+        "NEEDS_HUMAN_VERIFICATION": "需要人工复核",
+    }
+    lines = ["| 对齐类型 | 数量 | 含义 | 证据文件 |", "| --- | --- | --- | --- |"]
+    for status in ("MATCH", "PARTIAL_MATCH", "MISMATCH", "NOT_AVAILABLE", "NEEDS_HUMAN_VERIFICATION"):
+        lines.append(f"| {status} | {counts.get(status, 0)} | {meanings[status]} | paper_alignment.csv、L4_ALIGNMENT_SUMMARY.md |")
+    return "\n".join(lines)
+
+
+def _final_conclusion(
+    *,
+    formal_verdict: str,
+    accepted_level: str,
+    observed_level: str,
+    target_level: str,
+    target_reached: bool,
+) -> str:
+    if accepted_level == "L4_reduced_paper_aligned":
+        return (
+            "本次运行达到 `L4_reduced_paper_aligned`，表示系统在官方源码和缩减数据范围内，"
+            "完成了与论文关键实验设置相对齐的复现实验。但本次没有正式声明完整数据规模、多次重复实验或全部论文方法覆盖，因此不构成 L5/L6。"
+        )
+    if observed_level == "L4_reduced_paper_aligned" and accepted_level != observed_level:
+        return (
+            f"本次运行观察到 `L4_reduced_paper_aligned` 候选证据，但正式 accepted_level 为 `{accepted_level}`。"
+            "报告层不会把 observed_level 改写为 accepted_level；正式结论仍以 `FINAL_DECISION.json` 为准。"
+        )
+    return (
+        f"本次正式 verdict 为 `{formal_verdict}`，accepted_level 为 `{accepted_level}`，observed_level 为 `{observed_level}`，"
+        f"目标等级为 `{target_level}`，target_reached 为 `{target_reached}`。"
+        "这说明本报告只总结当前已正式接受的复现证据，不扩展声明 L5/L6 或 full reproduction。"
+    )
+
+
+def _summary_fields(summary: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw_line in str(summary or "").splitlines():
+        line = raw_line.strip().lstrip("-").strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def _alignment_counts(summary: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    status_line = ""
+    for raw_line in str(summary or "").splitlines():
+        line = raw_line.strip().lstrip("-").strip()
+        if line.startswith("Alignment statuses:"):
+            status_line = line.split(":", 1)[1]
+            break
+    for status, value in re.findall(r"([A-Z_]+)\s*:\s*(\d+)", status_line):
+        counts[status] = int(value)
+    if counts:
+        return counts
+    for status, value in re.findall(r"(MATCH|PARTIAL_MATCH|MISMATCH|NOT_AVAILABLE|NEEDS_HUMAN_VERIFICATION)\s+rows:\s*(\d+)", summary):
+        counts[status] = int(value)
+    return counts
+
+
+def _cell(value: object) -> str:
+    text = str(value or "").strip()
+    return text.replace("|", "\\|") or "-"
 
 
 def run_final_writer(
@@ -229,7 +378,13 @@ def _write_openclaw_input(
                 "",
                 "Output requirements:",
                 "- Write Simplified Chinese Markdown.",
+                "- Use Chinese section titles and Chinese explanatory prose.",
+                "- Keep machine field names and verdict values unchanged when quoting them, such as `PASS_REDUCED_ALIGNED` and `L4_reduced_paper_aligned`.",
                 "- Include the note that FINAL_DECISION.json is the formal decision source.",
+                "- Start with `# 最终复现报告摘要`.",
+                "- Use sections `## 1. 论文与任务概览` through `## 7. 推荐查看文件`.",
+                "- Put diagnostics and raw machine fields after the human-readable summary, not before it.",
+                "- For result tables, use only values present in the provided JSON/context or named evidence files.",
                 "- Keep the narrative based only on the JSON/context below.",
                 "",
                 "When finished, return raw JSON only, without Markdown fences:",

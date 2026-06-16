@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from r2a.core.paths import artifact_dir, report_path
+from r2a.core.review_verdict import normalize_verdict_token
 from r2a.tools.evidence_levels import contract_l2_cap_reason
 from r2a.tools.input_integrity import summarize_official_input_integrity
 
@@ -365,7 +366,21 @@ def validate_reviewer_transaction(
             execution_status = execution_status or "REVIEWER_MALFORMED_FEEDBACK"
             issues.append(f"REVIEW_FEEDBACK.json is not valid JSON: {exc}.")
 
-    verdict = _normalize_verdict(parsed_feedback.get("verdict") or parsed_feedback.get("status"))
+    raw_verdict = parsed_feedback.get("verdict") or parsed_feedback.get("status")
+    verdict = _normalize_verdict(raw_verdict)
+    normalization_reason = ""
+    if parsed_feedback and verdict and str(raw_verdict or "").strip().upper() != verdict:
+        raw_upper = str(raw_verdict or "").strip().upper()
+        if "NEEDS_INPUT" in raw_upper and verdict == "NEEDS_INPUT_OR_BUDGET":
+            normalization_reason = (
+                "NEEDS_INPUT is an internal blocking status alias, not an allowed formal reviewer verdict."
+            )
+        else:
+            normalization_reason = "Reviewer feedback verdict token was normalized before formal validation."
+        parsed_feedback.setdefault("raw_verdict", str(raw_verdict or "").strip())
+        parsed_feedback["verdict"] = verdict
+        parsed_feedback["normalization_reason"] = normalization_reason
+        feedback.write_text(json.dumps(parsed_feedback, indent=2, ensure_ascii=False), encoding="utf-8")
     if parsed_feedback and not verdict:
         failure_category = failure_category or "REVIEWER_FEEDBACK_VALIDATION_FAILED"
         execution_status = execution_status or "REVIEWER_INVALID_VERDICT"
@@ -420,7 +435,9 @@ def validate_reviewer_transaction(
         "boundary_violation": bool(result.get("unexpected_modifications")),
         "input_integrity_status": input_integrity.get("input_contract_integrity_status", ""),
         "contract_l2_cap_reason": cap_reason,
+        "raw_candidate_verdict": str(raw_verdict or "").strip(),
         "candidate_verdict": verdict,
+        "verdict_normalization_reason": normalization_reason,
         "manager_classification_conflict": manager_classification_conflict,
         "classification_conflicts": _classification_conflicts(parsed_feedback),
         "issues": issues,
@@ -510,7 +527,7 @@ def _extract_contract_mode(contract_text: str) -> str:
 
 
 def _normalize_verdict(value: object) -> str:
-    return str(value or "").strip().upper()
+    return normalize_verdict_token(value)
 
 
 def _declares_manager_classification_conflict(feedback: dict[str, Any]) -> bool:

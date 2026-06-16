@@ -14,6 +14,8 @@ from pathlib import Path
 import tempfile
 import json
 
+from r2a.core.final_decision import build_final_decision
+from r2a.core.paths import report_path
 from r2a.tools.workflow_decision import aggregate_terminal_decision
 
 
@@ -301,6 +303,71 @@ class TestIterationBoundary:
 
         assert decision["typed_decision"] == "continue_iteration"
         assert decision["terminal"] is False
+
+    @patch("r2a.tools.workflow_decision.paper_markdown_artifacts_available")
+    @patch("r2a.tools.workflow_decision.paper_bundle_status")
+    def test_planner_only_iteration_at_max_does_not_finalize(self, mock_bundle, mock_markdown):
+        """iteration == max_iterations is not enough without current Reviewer completion."""
+        mock_markdown.return_value = {"usable": True, "available_artifacts": ["paper_context"], "artifact_count": 1}
+        mock_bundle.return_value = {"status": "valid", "missing_required": [], "text_fallback_available": False}
+
+        state = self._make_state(
+            iteration=8,
+            max_iterations=8,
+            reviewer_executed=False,
+            reviewer_verdict="",
+            current_reproduction_level="L4_reduced_paper_aligned",
+        )
+        state["structured_review_feedback"] = {}
+        state["latest_review_feedback_path"] = "/old/iter_007/REVIEW_FEEDBACK.json"
+        state["review_feedback_path"] = ""
+        state["iteration_history"] = [
+            {
+                "iteration": iteration,
+                "task_spec": f"iter_{iteration:03d}/TASK_SPEC.md",
+                "review_report": f"iter_{iteration:03d}/REVIEW_REPORT.md",
+                "review_feedback": f"iter_{iteration:03d}/REVIEW_FEEDBACK.json",
+                "reviewer_verdict": "PASS_REDUCED_ALIGNED",
+                "archive_missing_files": [],
+            }
+            for iteration in range(1, 8)
+        ]
+
+        decision = aggregate_terminal_decision(state)
+
+        assert decision["typed_decision"] == "continue_iteration"
+        assert decision["reason_code"] == "READY_FOR_NEXT_STAGE"
+        assert decision["completed_review_iterations"] == 7
+        assert decision["terminal"] is False
+
+
+def test_terminal_failure_final_status_overrides_stale_target_reached(tmp_path: Path) -> None:
+    path = report_path(tmp_path, "evidence_decision")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "current_reproduction_level": "L4_reduced_paper_aligned",
+                "verdict": "PASS_REDUCED_ALIGNED",
+                "level_valid": True,
+                "target_level": "L4_reduced_paper_aligned",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "repo_path": str(tmp_path),
+        "target_reproduction_level": "L4_reduced_paper_aligned",
+        "decision_status": {"typed_decision": "terminal_failed", "reason_code": "PLANNER_TRANSACTION_FAILED"},
+        "failed_stage": "planner",
+        "loop_status": "planner_failed",
+        "stop_reason": "PLANNER_TRANSACTION_FAILED",
+    }
+
+    decision = build_final_decision(state, write=False)
+
+    assert decision["target_reached"] is True
+    assert decision["final_status"] == "completed_with_failure"
 
 
 class TestIterationBoundaryIntegration:

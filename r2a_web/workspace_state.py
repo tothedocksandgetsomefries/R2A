@@ -21,8 +21,16 @@ TERMINAL_RUN_STATUSES = {
     "stopped",
     "terminal_failed",
 }
+TERMINAL_FINAL_STATUSES = TERMINAL_RUN_STATUSES | {"failed"}
+STOP_REQUESTED_STATUSES = {"stop_requested", "stop_requested_waiting_for_safe_boundary"}
+USER_STOP_REASONS = {
+    "user_cancelled",
+    "user_requested",
+    "user_requested_after_status_check",
+}
 AUTO_REFRESH_DISABLED_REASON = "auto-refresh disabled; manual refresh only"
 RUNTIME_RECOVERY_SCAN_LIMIT = 200
+STOPPING_ACTIVE_HEARTBEAT_SECONDS = 5 * 60
 
 
 def apply_workspace_session(session: MutableMapping[str, Any], workspace: dict[str, Any]) -> None:
@@ -68,6 +76,10 @@ def restore_runtime_run_session(session: MutableMapping[str, Any]) -> bool:
     The runtime record remains the live source of truth. This helper only
     restores UI session state; it never creates a workspace or writes workflow
     artifacts.
+
+    IMPORTANT: Only recovers active runs (running/stopping/force_killing/failed_to_kill).
+    Terminal runs (completed/failed/etc) are NOT auto-recovered to avoid confusing
+    historical runs with current active runs.
     """
     if isinstance(session.get("workspace"), dict) or str(session.get("workspace_path", "") or "").strip():
         return False
@@ -96,7 +108,26 @@ def restore_runtime_run_session(session: MutableMapping[str, Any]) -> bool:
         }
         return False
 
-    status = str(record.get("status", "")).lower()
+    status = _record_status(record)
+    is_active = run_record_is_recoverable_active(record)
+    is_terminal = _record_is_terminal(record)
+
+    if not is_active:
+        # Don't recover terminal runs as active runs
+        # Just record that we found a terminal run for optional manual loading
+        session["runtime_recovery"] = {
+            "recovered": False,
+            "reason": "terminal_run" if is_terminal else "stale_active_pointer",
+            "message": (
+                f"Found terminal run (status: {status}). Use 'Load latest run' to view."
+                if is_terminal
+                else f"Ignored stale active run pointer (status: {status})."
+            ),
+            "pointer_run_id": run_id,
+            "pointer_status": status,
+            "pointer_workspace_dir": workspace_dir,
+        }
+        return False
 
     # Build workspace from workspace_dir or pointer
     workspace: dict[str, Any] = {}
@@ -114,12 +145,13 @@ def restore_runtime_run_session(session: MutableMapping[str, Any]) -> bool:
 
     apply_workspace_session(session, workspace)
     session["active_run_id"] = run_id
-    session["workflow_running"] = status in ACTIVE_POLLING_STATUSES
+    session["workflow_running"] = is_active
+    session["recovered_active_run"] = True
+    session["run_created_this_session"] = False
+    session["loaded_historical_run"] = False
 
     message = (
         "Recovered active run from active_run.json pointer."
-        if status in ACTIVE_POLLING_STATUSES
-        else f"Recovered run from active_run.json pointer (status: {status})."
     )
     session["runtime_recovery"] = {
         "recovered": True,
@@ -141,14 +173,18 @@ def restore_runtime_run_session_by_scan(session: MutableMapping[str, Any]) -> bo
     The runtime record remains the live source of truth. This helper only
     restores UI session state; it never creates a workspace or writes workflow
     artifacts.
+
+    IMPORTANT: Only recovers active runs (running/stopping/force_killing/failed_to_kill).
+    Terminal runs are NOT auto-recovered.
     """
     if isinstance(session.get("workspace"), dict) or str(session.get("workspace_path", "") or "").strip():
         return False
 
     candidates = _runtime_recovery_candidates()
-    active = [item for item in candidates if item["status"] in ACTIVE_POLLING_STATUSES]
-    selected = active[0] if active else _latest_non_terminal_candidate(candidates)
-    if not selected:
+    active = [item for item in candidates if item.get("recoverable_active")]
+
+    # CRITICAL FIX: Only recover active runs, not terminal runs
+    if not active:
         terminal_count = sum(1 for item in candidates if item["status"] in TERMINAL_RUN_STATUSES)
         if terminal_count:
             session["runtime_recovery"] = {
@@ -159,24 +195,23 @@ def restore_runtime_run_session_by_scan(session: MutableMapping[str, Any]) -> bo
             }
         return False
 
+    selected = active[0]
+
     apply_workspace_session(session, dict(selected["workspace"]))
     session["active_run_id"] = selected["run_id"]
-    session["workflow_running"] = selected["status"] in ACTIVE_POLLING_STATUSES
-    mode = "active" if selected in active else "history"
-    message = (
-        "Recovered active run from runtime record scan."
-        if mode == "active"
-        else "Recovered recent non-terminal run from runtime record scan as history."
-    )
+    session["workflow_running"] = True
+    session["recovered_active_run"] = True
+    session["run_created_this_session"] = False
+    session["loaded_historical_run"] = False
     session["runtime_recovery"] = {
         "recovered": True,
-        "mode": mode,
-        "message": message,
+        "mode": "active",
+        "message": "Recovered active run from runtime record scan.",
         "selected_run_id": selected["run_id"],
         "selected_status": selected["status"],
         "selected_workspace_dir": selected["workspace"].get("workspace_dir", ""),
         "active_candidate_count": len(active),
-        "candidates": _candidate_diagnostics(active or candidates),
+        "candidates": _candidate_diagnostics(active),
     }
     return True
 
@@ -243,7 +278,7 @@ def has_active_run(session: Mapping[str, Any]) -> bool:
     record = read_run_record(repo_path, run_id)
     if not record:
         return False
-    return str(record.get("status", "")) in ACTIVE_POLLING_STATUSES
+    return run_record_is_recoverable_active(record)
 
 
 def active_run_autorefresh_off_message(session: Mapping[str, Any]) -> str:
@@ -287,8 +322,72 @@ def sync_background_run_readonly(session: MutableMapping[str, Any]) -> None:
     record = read_run_record(repo_path, run_id)
     if not record:
         return
-    status = str(record.get("status", ""))
-    session["workflow_running"] = status in ACTIVE_POLLING_STATUSES
+    session["workflow_running"] = run_record_is_recoverable_active(record)
+
+
+def run_record_is_recoverable_active(record: Mapping[str, Any]) -> bool:
+    """Return whether a runtime record should lock the UI as an active run."""
+    status = _record_status(record)
+    if status not in ACTIVE_POLLING_STATUSES:
+        return False
+    if _record_is_terminal(record):
+        return False
+    if status == "stopping":
+        return _record_has_active_stopping_evidence(record)
+    if _record_has_user_stop_signal(record):
+        return False
+    return True
+
+
+def _record_status(record: Mapping[str, Any]) -> str:
+    return str(record.get("status", "") or "").strip().lower()
+
+
+def _record_is_terminal(record: Mapping[str, Any]) -> bool:
+    if _record_status(record) in TERMINAL_RUN_STATUSES:
+        return True
+    final_status = str(record.get("final_status", "") or "").strip().lower()
+    if final_status in TERMINAL_FINAL_STATUSES:
+        return True
+    return any(bool(record.get(key)) for key in ("force_killed", "cancelled", "stopped"))
+
+
+def _record_has_user_stop_signal(record: Mapping[str, Any]) -> bool:
+    stage_status = str(record.get("stage_status", "") or "").strip().lower()
+    if stage_status in STOP_REQUESTED_STATUSES:
+        return True
+    reason = str(
+        record.get("stop_reason", "")
+        or record.get("termination_reason", "")
+        or record.get("cancel_reason", "")
+        or ""
+    ).strip().lower()
+    if reason in USER_STOP_REASONS:
+        return True
+    return bool(record.get("cancel_requested") or record.get("cancellation_requested"))
+
+
+def _record_has_active_stopping_evidence(record: Mapping[str, Any]) -> bool:
+    if not _record_heartbeat_is_fresh(record, STOPPING_ACTIVE_HEARTBEAT_SECONDS):
+        return False
+    return bool(
+        record.get("windows_processes")
+        or record.get("wsl_process_groups")
+        or record.get("pid")
+        or record.get("process_id")
+    )
+
+
+def _record_heartbeat_is_fresh(record: Mapping[str, Any], max_age_seconds: int) -> bool:
+    last_seen = None
+    for key in ("heartbeat_at", "updated_at", "started_at"):
+        parsed = _parse_timestamp(record.get(key))
+        if parsed is not None:
+            last_seen = parsed
+            break
+    if last_seen is None:
+        return False
+    return (datetime.now(timezone.utc).timestamp() - last_seen) <= max_age_seconds
 
 
 def polling_should_autorefresh(session: Mapping[str, Any], *, ui_polling_enabled: bool) -> bool:
@@ -352,6 +451,7 @@ def _runtime_recovery_candidates() -> list[dict[str, Any]]:
                 "path": str(path),
                 "run_id": run_id,
                 "status": status,
+                "recoverable_active": run_record_is_recoverable_active(record),
                 "workspace": workspace,
                 "sort_key": _record_sort_key(record, path),
             }

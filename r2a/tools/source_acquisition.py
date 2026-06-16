@@ -464,6 +464,17 @@ def _clone_source(
     normalization = _normalize_github_clone_url(url)
     clone_url = str(normalization.get("repo_url") or url)
     branch = str(normalization.get("branch") or "")
+
+    # CRITICAL GUARD: Reject incomplete GitHub URLs before attempting clone
+    if not _is_complete_github_repo_url(clone_url):
+        return {
+            "status": "invalid_url",
+            "source_status": "invalid_url",
+            "message": f"Invalid or incomplete GitHub URL: {clone_url}. GitHub URLs must include owner/repo.",
+            "repo_url": clone_url,
+            "source_url_normalization": normalization,
+        }
+
     if shutil.which("git") is None:
         return {
             "status": "missing",
@@ -775,6 +786,14 @@ def _classify_git_url(
     contexts = contexts if contexts is not None else paper_context.get("url_contexts", {}).get(url, [])
     context_blob = "\n".join(contexts).lower()
 
+    # CRITICAL: Check for incomplete GitHub URL first (no owner/repo)
+    if not _is_complete_github_repo_url(url):
+        result["candidate_type"] = "invalid_or_incomplete_url"
+        result["confidence"] = "low"
+        result["evidence"] = ["GitHub URL does not include owner/repo."]
+        result["selection_reason"] = "Invalid or incomplete GitHub URL; cannot be cloned."
+        return result
+
     if origin == "user_provided_hint":
         result["candidate_type"] = "official_implementation_repo"
         result["confidence"] = "medium"
@@ -802,6 +821,14 @@ def _classify_git_url(
             result["confidence"] = "high"
             result["evidence"] = [f"Known dependency or baseline repository: {owner_repo or url}"]
         result["selection_reason"] = "Known base/dependency repository requires paper-specific branch/path/commit evidence before official implementation selection."
+        return result
+
+    labeled_url_evidence = _labeled_official_url_evidence(url, contexts)
+    if owner_repo and labeled_url_evidence:
+        result["candidate_type"] = "official_implementation_repo"
+        result["confidence"] = "high"
+        result["evidence"] = [labeled_url_evidence]
+        result["selection_reason"] = labeled_url_evidence
         return result
 
     # Check for official code phrases near the URL
@@ -967,6 +994,30 @@ def _why_not_selected(candidate_type: str, origin: str, confidence: str) -> str:
     return "No sufficient evidence for paper-specific official implementation selection."
 
 
+def _is_complete_github_repo_url(url: str) -> bool:
+    """Check if a GitHub URL has owner/repo (is cloneable).
+
+    Returns False for:
+    - https://github.com/
+    - https://github.com
+    - https://www.github.com/
+
+    Returns True for:
+    - https://github.com/owner/repo
+    - https://github.com/owner/repo.git
+    - Non-GitHub URLs (not our concern here)
+    """
+    try:
+        parsed = urlsplit((url or "").strip())
+    except ValueError:
+        return False
+    host = parsed.netloc.lower()
+    if host not in {"github.com", "www.github.com"}:
+        return True  # Non-GitHub URLs are not checked here
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    return len(parts) >= 2
+
+
 def _github_owner_repo_key(url: str) -> str:
     try:
         parsed = urlsplit(_strip_trailing_url_punctuation(url))
@@ -1004,19 +1055,107 @@ def _strong_artifact_match(context_blob: str) -> bool:
 
 
 def _negative_artifact_context(context_blob: str) -> bool:
-    return any(
-        marker in context_blob
-        for marker in (
-            "artifact url: not available",
-            "artifact url not available",
-            "artifact: not available",
-            "not available",
-            "no official code",
-            "no official source",
-            "no repository link",
-            "implementation unavailable",
+    text = context_blob.lower()
+    source_negative_fields = {
+        "artifact",
+        "artifact url",
+        "code",
+        "code url",
+        "repository",
+        "repository url",
+        "source",
+        "source code",
+        "source code url",
+        "source repository",
+        "source url",
+    }
+    for line in text.splitlines():
+        parsed = _parse_context_field(line)
+        if not parsed:
+            continue
+        label, value = parsed
+        if label in source_negative_fields and _negative_field_value(value):
+            return True
+
+    return bool(
+        re.search(
+            r"\b(?:no\s+(?:official\s+)?(?:code|source|source code|repository)(?:\s+link)?\s+(?:available|provided)|"
+            r"(?:code|source|source code|repository|implementation)\s+(?:is\s+)?(?:not\s+available|unavailable))\b",
+            text,
         )
     )
+
+
+def _labeled_official_url_evidence(url: str, contexts: list[str]) -> str:
+    target_url = _strip_trailing_url_punctuation(url).rstrip("/")
+    if not target_url:
+        return ""
+    official_labels = {
+        "artifact url",
+        "code",
+        "code url",
+        "repository",
+        "repository url",
+        "source code",
+        "source code url",
+    }
+    for context in contexts:
+        lines = context.splitlines()
+        for index, line in enumerate(lines):
+            parsed = _parse_context_field(line)
+            if not parsed:
+                continue
+            label, value = parsed
+            if label not in official_labels:
+                continue
+            if _negative_field_value(value):
+                continue
+
+            span_lines = [value]
+            if _span_contains_url(span_lines, target_url):
+                return f"Found labeled official source field '{label}' attached to URL"
+
+            for next_line in lines[index + 1:index + 4]:
+                next_parsed = _parse_context_field(next_line)
+                if next_parsed:
+                    break
+                span_lines.append(next_line)
+                if _span_contains_url(span_lines, target_url):
+                    return f"Found labeled official source field '{label}' attached to URL"
+    return ""
+
+
+def _parse_context_field(line: str) -> tuple[str, str] | None:
+    if re.match(r"^\s*https?://", line, flags=re.IGNORECASE):
+        return None
+    match = re.match(
+        r"^\s*(?:[-*+]\s*)?(?:\*\*)?\s*(?P<label>[a-z][a-z0-9 /_-]{0,48}?)(?:\*\*)?\s*:\s*(?P<value>.*)$",
+        line.strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    label = re.sub(r"\s+", " ", match.group("label").strip(" *").lower())
+    value = match.group("value").strip()
+    return label, value
+
+
+def _negative_field_value(value: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:not\s+available|unavailable|not\s+provided|not\s+released|none|n/?a)\b",
+            value.lower(),
+        )
+    )
+
+
+def _span_contains_url(lines: list[str], target_url: str) -> bool:
+    span = "\n".join(lines)
+    for found in re.findall(r"https?://[^\s,;)\]]+", span):
+        cleaned = _strip_trailing_url_punctuation(found).rstrip("/")
+        if cleaned == target_url:
+            return True
+    return False
 
 
 def _url_context(text: str, url: str, *, radius: int = 200) -> str:
@@ -1075,19 +1214,24 @@ def _load_paper_context(repo: Path) -> dict[str, Any]:
 
 
 def _select_official_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Select the best implementation source candidate from classified URLs."""
-    # Priority 1: high-confidence paper-derived official implementation.
-    for candidate in candidates:
-        if (
-            candidate.get("candidate_type") == "official_implementation_repo"
-            and candidate.get("origin") != "user_provided_hint"
-            and candidate.get("confidence") == "high"
-        ):
-            return candidate
+    """Select the best implementation source candidate from classified URLs.
 
-    # Priority 2: user-provided source hints. They are selected for inspection,
+    Priority:
+    0. Filter invalid/incomplete URLs (never selectable)
+    1. Valid user-provided source hints (confidence high/medium)
+    2. Valid paper-derived official implementation (confidence high)
+    3. Valid paper-derived official implementation (confidence medium)
+    """
+    # Filter selectable candidates (exclude invalid/incomplete URLs)
+    selectable = [
+        c for c in candidates
+        if c.get("candidate_type") not in {"invalid_or_incomplete_url", "invalid"}
+        and _is_complete_github_repo_url(c.get("url", ""))
+    ]
+
+    # Priority 1: user-provided source hints. They are selected for inspection,
     # but not treated as verified paper evidence.
-    for candidate in candidates:
+    for candidate in selectable:
         if (
             candidate.get("candidate_type") == "official_implementation_repo"
             and candidate.get("origin") == "user_provided_hint"
@@ -1095,8 +1239,17 @@ def _select_official_candidate(candidates: list[dict[str, Any]]) -> dict[str, An
         ):
             return candidate
 
+    # Priority 2: high-confidence paper-derived official implementation.
+    for candidate in selectable:
+        if (
+            candidate.get("candidate_type") == "official_implementation_repo"
+            and candidate.get("origin") != "user_provided_hint"
+            and candidate.get("confidence") == "high"
+        ):
+            return candidate
+
     # Priority 3: medium-confidence paper implementation candidates, if any.
-    for candidate in candidates:
+    for candidate in selectable:
         if (
             candidate.get("candidate_type") == "official_implementation_repo"
             and candidate.get("origin") != "user_provided_hint"

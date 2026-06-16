@@ -9,6 +9,7 @@ from r2a.workspace.manifest import build_workspace_manifest, write_workspace_man
 from r2a_web.workspace_state import (
     restore_runtime_run_session,
     restore_runtime_run_session_by_scan,
+    run_workflow_button_disabled,
 )
 
 
@@ -58,6 +59,7 @@ def test_empty_session_recovers_from_pointer(tmp_path: Path, monkeypatch) -> Non
     assert session["workspace"]["repo_path"] == str(repo)
     assert session["active_run_id"] == "run-1"
     assert session["workflow_running"] is True
+    assert session["recovered_active_run"] is True
     assert "pointer" in session["runtime_recovery"]["mode"]
 
 
@@ -123,7 +125,12 @@ def test_pointer_missing_fields_no_crash(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_pointer_terminal_run_not_running(tmp_path: Path, monkeypatch) -> None:
-    """P1: Pointer to terminal run should not show as running."""
+    """P1: Pointer to terminal run should NOT be recovered as active run.
+
+    Terminal runs (force_killed, completed, failed, etc) should not be
+    auto-recovered on fresh startup to avoid confusing historical runs
+    with current active runs.
+    """
     monkeypatch.setenv("R2A_RUNTIME_ROOT", str(tmp_path / "runtime"))
     workspace, repo = _workspace(tmp_path, "run-terminal")
     create_run_record(repo, "run-dead", status="force_killed", current_stage="engineer", workspace_dir=str(workspace))
@@ -132,9 +139,92 @@ def test_pointer_terminal_run_not_running(tmp_path: Path, monkeypatch) -> None:
 
     recovered = restore_runtime_run_session(session)
 
-    assert recovered is True  # Pointer exists and run exists
-    assert session["workflow_running"] is False  # But status is terminal
-    assert "force_killed" in session["runtime_recovery"]["message"]
+    assert recovered is False  # Terminal run should NOT be recovered
+    assert session.get("workflow_running") is not True  # Not running
+    assert session["runtime_recovery"]["reason"] == "terminal_run"  # Marked as terminal
+
+
+def test_pointer_stopping_stop_requested_not_recovered_as_active(tmp_path: Path, monkeypatch) -> None:
+    """A stopped/cancelling pointer must not lock the UI on fresh startup."""
+    monkeypatch.setenv("R2A_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    workspace, repo = _workspace(tmp_path, "run-stopping")
+    create_run_record(
+        repo,
+        "run-stop",
+        status="stopping",
+        current_stage="engineer",
+        stage_status="stop_requested",
+        stop_reason="user_requested",
+        workspace_dir=str(workspace),
+    )
+    _write_active_run_pointer(tmp_path, "run-stop", str(repo), str(workspace), status="stopping")
+    session: dict = {}
+
+    recovered = restore_runtime_run_session(session)
+
+    assert recovered is False
+    assert session.get("active_run_id") in {None, ""}
+    assert session.get("workflow_running") is not True
+    assert session["runtime_recovery"]["reason"] == "stale_active_pointer"
+
+
+def test_pointer_final_status_cancelled_not_recovered_as_active(tmp_path: Path, monkeypatch) -> None:
+    """final_status=cancelled wins even if the runtime status is still running."""
+    monkeypatch.setenv("R2A_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    workspace, repo = _workspace(tmp_path, "run-cancelled")
+    record_path = create_run_record(repo, "run-cancelled", status="running", current_stage="engineer", workspace_dir=str(workspace))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["final_status"] = "cancelled"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    _write_active_run_pointer(tmp_path, "run-cancelled", str(repo), str(workspace), status="running")
+    session: dict = {}
+
+    recovered = restore_runtime_run_session(session)
+
+    assert recovered is False
+    assert session.get("workflow_running") is not True
+    assert session["runtime_recovery"]["reason"] == "terminal_run"
+
+
+def test_terminal_pointer_statuses_are_not_recovered_as_active(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("R2A_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    for status in ("completed_with_failure", "terminal_failed", "failed", "stopped"):
+        workspace, repo = _workspace(tmp_path, f"run-{status}")
+        run_id = f"run-{status}"
+        create_run_record(repo, run_id, status=status, current_stage="final", workspace_dir=str(workspace))
+        _write_active_run_pointer(tmp_path, run_id, str(repo), str(workspace), status=status)
+        session: dict = {}
+
+        assert restore_runtime_run_session(session) is False
+        assert session.get("workflow_running") is not True
+        assert session["runtime_recovery"]["reason"] == "terminal_run"
+
+
+def test_stale_active_pointer_does_not_disable_run_workflow(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("R2A_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    workspace, repo = _workspace(tmp_path, "run-button")
+    create_run_record(
+        repo,
+        "run-stop",
+        status="stopping",
+        current_stage="engineer",
+        stage_status="stop_requested",
+        stop_reason="user_requested",
+        workspace_dir=str(workspace),
+    )
+    session: dict = {
+        "workspace_created": True,
+        "workspace": {
+            "workspace_dir": str(workspace),
+            "repo_path": str(repo),
+        },
+        "active_run_id": "run-stop",
+    }
+
+    disabled, reason = run_workflow_button_disabled(session, "ccr_text")
+
+    assert disabled is False
+    assert reason == ""
 
 
 # P0 tests: restore_runtime_run_session_by_scan for manual recovery
@@ -154,6 +244,7 @@ def test_scan_recovers_active_runtime_run(tmp_path: Path, monkeypatch) -> None:
     assert session["workspace"]["repo_path"] == str(repo)
     assert session["active_run_id"] == "run-1"
     assert session["workflow_running"] is True
+    assert session["recovered_active_run"] is True
 
 
 def test_scan_selects_most_recent_active_run(tmp_path: Path, monkeypatch) -> None:

@@ -148,7 +148,7 @@ def test_reviewer_and_final_reports_show_user_hints_as_unverified_context(tmp_pa
 
     assert "## User Guidance" in review_text
     assert "https://huggingface.co/datasets/acme/tiny" in review_text
-    assert "User Hints / Source Provenance Notes" in final_text
+    assert "用户提示 / 源码来源说明" in final_text
     assert "Do not treat user guidance as verified paper evidence" in final_text
 
 

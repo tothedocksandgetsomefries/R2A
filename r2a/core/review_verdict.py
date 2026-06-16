@@ -29,6 +29,11 @@ def review_verdict_path(repo_path: str | Path) -> Path:
 
 
 def normalize_verdict_token(value: object) -> str:
+    """Normalize verdict token and map NEEDS_INPUT to canonical verdict.
+
+    NEEDS_INPUT is an internal blocking status/alias, not an allowed formal reviewer verdict.
+    It should be mapped to NEEDS_INPUT_OR_BUDGET (default) or NEEDS_OFFICIAL_INPUT.
+    """
     text = str(value or "").strip()
     changed = True
     while changed and text:
@@ -41,7 +46,13 @@ def normalize_verdict_token(value: object) -> str:
         text = _strip_wrapping(text, "\u201c", "\u201d")
         text = _strip_wrapping(text, "\u2018", "\u2019")
         changed = text != before
-    return text.strip().upper()
+    normalized = text.strip().upper()
+
+    # Map NEEDS_INPUT (internal blocking status) to canonical verdict
+    if normalized == "NEEDS_INPUT":
+        normalized = "NEEDS_INPUT_OR_BUDGET"
+
+    return normalized
 
 
 def load_review_verdict(path_or_repo: str | Path) -> ReviewVerdictValidation:

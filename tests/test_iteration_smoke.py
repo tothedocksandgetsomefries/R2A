@@ -8,16 +8,16 @@ from r2a.core.state import make_initial_state
 from r2a.workflow.graph import build_workflow_graph
 
 
-def test_graph_reviewer_verdict_does_not_force_second_iteration(tmp_path: Path) -> None:
-    """Reviewer feedback is advisory; decision_status is the router authority.
+def test_graph_auto_iteration_runs_until_max_iterations(tmp_path: Path) -> None:
+    """Reviewer feedback is advisory; max_iterations counts complete Reviewer cycles.
 
     Setup:
     - Reviewer returns NEEDS_FIX and asks for replan
     - auto_iterate=True, max_iterations=2
 
     Expected:
-    - Reviewer feedback alone does not authorize routing
-    - decision_status remains the router authority
+    - target/verdict does not stop early
+    - exactly 2 Reviewer cycles run before MAX_ITERATIONS_REACHED
     """
     # Create minimal readable paper context.
     paper = tmp_path / "paper.txt"
@@ -69,11 +69,12 @@ def test_graph_reviewer_verdict_does_not_force_second_iteration(tmp_path: Path) 
 
         result = graph.invoke(initial_state)
 
-        # Reviewer NEEDS_FIX is advisory; decision_status controls final routing.
+        # Reviewer NEEDS_FIX/PASS is advisory; max_iterations controls final routing.
         assert result.get("iteration") == 2, f"Final iteration should follow decision_status, got {result.get('iteration')}"
-        assert iteration_count[0] == 1
+        assert iteration_count[0] == 2
         assert result.get("decision_status", {}).get("typed_decision") == "final"
         assert result.get("decision_status", {}).get("reason_code") == "MAX_ITERATIONS_REACHED"
+        assert result.get("decision_status", {}).get("completed_review_iterations") == 2
 
         # Verify paper_brief_path exists (Paper executed at least once)
         assert result.get("paper_brief_path"), "Paper should have executed and generated paper_brief_path"

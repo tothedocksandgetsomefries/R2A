@@ -681,6 +681,151 @@ def test_artifact_not_available_does_not_promote_nearby_baseline_links(tmp_path:
         assert candidate["selected"] is False
 
 
+def test_arxiv_not_available_does_not_block_artifact_url_label(tmp_path: Path) -> None:
+    paper = _write_paper_bundle(tmp_path)
+    repo_url = "https://github.com/spcl/fanns-benchmark"
+    report_path(tmp_path, "paper_context").write_text(
+        "# Paper Context\n\n"
+        "- **arXiv/DOI**: Not available\n"
+        f"- **Artifact URL**: {repo_url}\n",
+        encoding="utf-8",
+    )
+    state = make_initial_state(tmp_path, paper_path=paper)
+
+    def mock_run(*args, **kwargs):
+        target = artifact_dir(tmp_path) / "artifacts" / "source"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "main.py").write_text("print('official')\n", encoding="utf-8")
+        result = mock.MagicMock()
+        result.returncode = 0
+        result.stdout = "Cloned"
+        result.stderr = ""
+        return result
+
+    with mock.patch("r2a.tools.source_acquisition.subprocess.run", side_effect=mock_run), \
+         mock.patch("r2a.tools.source_acquisition.shutil.which", return_value="/usr/bin/git"):
+        acquire_source(state)
+
+    source = read_source_acquisition(tmp_path)
+    candidate = next(c for c in source["candidates"] if c["url"] == repo_url)
+
+    assert source["source_status"] == "available"
+    assert candidate["candidate_type"] == "official_implementation_repo"
+    assert candidate["classification"] == "official"
+    assert candidate["confidence"] == "high"
+    assert candidate["selected"] is True
+
+
+def test_code_label_next_line_promotes_only_github_repo(tmp_path: Path) -> None:
+    paper = _write_paper_bundle(tmp_path)
+    repo_url = "https://github.com/spcl/fanns-benchmark"
+    dataset_url = "https://huggingface.co/datasets/SPCL/arxiv-for-fanns-small"
+    report_path(tmp_path, "paper_context").write_text(
+        "# Paper Context\n\n"
+        "Code:\n"
+        f"{repo_url}\n\n"
+        "Datasets:\n"
+        f"{dataset_url}\n",
+        encoding="utf-8",
+    )
+    state = make_initial_state(tmp_path, paper_path=paper)
+
+    def mock_run(*args, **kwargs):
+        target = artifact_dir(tmp_path) / "artifacts" / "source"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "main.py").write_text("print('official')\n", encoding="utf-8")
+        result = mock.MagicMock()
+        result.returncode = 0
+        result.stdout = "Cloned"
+        result.stderr = ""
+        return result
+
+    with mock.patch("r2a.tools.source_acquisition.subprocess.run", side_effect=mock_run), \
+         mock.patch("r2a.tools.source_acquisition.shutil.which", return_value="/usr/bin/git"):
+        acquire_source(state)
+
+    source = read_source_acquisition(tmp_path)
+    github_candidate = next(c for c in source["candidates"] if c["url"] == repo_url)
+    dataset_candidate = next(c for c in source["candidates"] if c["url"] == dataset_url)
+
+    assert source["source_status"] == "available"
+    assert github_candidate["candidate_type"] == "official_implementation_repo"
+    assert github_candidate["selected"] is True
+    assert dataset_candidate["candidate_type"] == "dataset_or_model"
+    assert dataset_candidate["classification"] == "dataset_or_model"
+    assert dataset_candidate["selected"] is False
+
+
+def test_artifact_url_not_available_remains_negative(tmp_path: Path) -> None:
+    paper = _write_paper_bundle(tmp_path)
+    report_path(tmp_path, "paper_context").write_text(
+        "# Paper Context\n\n"
+        "Artifact URL: Not available\n",
+        encoding="utf-8",
+    )
+    state = make_initial_state(tmp_path, paper_path=paper)
+
+    acquire_source(state)
+    source = read_source_acquisition(tmp_path)
+
+    assert source["source_status"] == "not_found"
+    assert source["selected_source"] is None
+    assert all(c["candidate_type"] != "official_implementation_repo" for c in source["candidates"])
+
+
+def test_unlabeled_dependency_github_url_is_not_official_source(tmp_path: Path) -> None:
+    paper = _write_paper_bundle(tmp_path)
+    repo_url = "https://github.com/facebookresearch/faiss"
+    report_path(tmp_path, "paper_context").write_text(
+        "# Paper Context\n\n"
+        f"We use FAISS: {repo_url}\n",
+        encoding="utf-8",
+    )
+    state = make_initial_state(tmp_path, paper_path=paper)
+
+    acquire_source(state)
+    source = read_source_acquisition(tmp_path)
+    candidate = next(c for c in source["candidates"] if c["url"] == repo_url)
+
+    assert source["source_status"] == "base_repo_available_implementation_missing"
+    assert candidate["candidate_type"] in {"official_base_repo", "dependency_repo"}
+    assert candidate["classification"] == "related_or_dependency"
+    assert candidate["selected"] is False
+
+
+def test_code_label_detection_is_not_repo_specific(tmp_path: Path) -> None:
+    paper = _write_paper_bundle(tmp_path)
+    repo_url = "https://github.com/owner/paper-code"
+    report_path(tmp_path, "paper_context").write_text(
+        "# Paper Context\n\n"
+        f"Code: {repo_url}\n",
+        encoding="utf-8",
+    )
+    state = make_initial_state(tmp_path, paper_path=paper)
+
+    def mock_run(*args, **kwargs):
+        target = artifact_dir(tmp_path) / "artifacts" / "source"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "main.py").write_text("print('official')\n", encoding="utf-8")
+        result = mock.MagicMock()
+        result.returncode = 0
+        result.stdout = "Cloned"
+        result.stderr = ""
+        return result
+
+    with mock.patch("r2a.tools.source_acquisition.subprocess.run", side_effect=mock_run), \
+         mock.patch("r2a.tools.source_acquisition.shutil.which", return_value="/usr/bin/git"):
+        acquire_source(state)
+
+    source = read_source_acquisition(tmp_path)
+    candidate = next(c for c in source["candidates"] if c["url"] == repo_url)
+
+    assert source["source_status"] == "available"
+    assert candidate["candidate_type"] == "official_implementation_repo"
+    assert candidate["classification"] == "official"
+    assert candidate["selected"] is True
+
+
 def test_user_provided_repo_hint_is_selected_with_provenance(tmp_path: Path) -> None:
     paper = _write_paper_bundle(tmp_path)
     report_path(tmp_path, "paper_context").write_text(

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from r2a.core.state import make_initial_state
-from r2a.tools.iteration import archive_current_iteration
+from r2a.tools.iteration import archive_current_iteration, archive_final_iteration
 from r2a.workflow.graph import build_workflow_graph
 
 
@@ -49,6 +49,7 @@ def test_auto_iteration_setting_archives_terminal_iteration_once(tmp_path: Path)
 
     artifact_dir = tmp_path / ".r2a"
     assert (artifact_dir / "runs" / "iter_001" / "REVIEW_REPORT.md").exists()
+    assert (artifact_dir / "runs" / "iter_002" / "REVIEW_REPORT.md").exists()
     assert (artifact_dir / "runs" / "iter_002" / "FINAL_REPORT.md").exists()
     assert Path(result["final_report_path"]).exists()
     # But iteration state should reflect the settings
@@ -56,6 +57,8 @@ def test_auto_iteration_setting_archives_terminal_iteration_once(tmp_path: Path)
     assert iteration_state_path.exists()
     iteration_state = json.loads(iteration_state_path.read_text(encoding="utf-8"))
     assert iteration_state["current_iteration"] == 2
+    assert iteration_state["current_iteration_complete"] is True
+    assert iteration_state["completed_review_iterations"] == 2
     assert iteration_state["auto_iterate"] is True
     assert iteration_state["decision_status"]["typed_decision"] == "final"
     assert iteration_state["decision_status"]["reason_code"] == "MAX_ITERATIONS_REACHED"
@@ -140,6 +143,48 @@ def test_archive_current_iteration_records_missing_reviewer_outputs_without_fake
     assert entry["review_feedback"] == ""
     assert "review_report" in entry["archive_missing_files"]
     assert "review_feedback" in entry["archive_missing_files"]
+
+
+def test_archive_final_iteration_does_not_create_completed_entry_without_current_reviewer(tmp_path: Path) -> None:
+    r2a = tmp_path / ".r2a"
+    r2a.mkdir(parents=True)
+    (r2a / "FINAL_REPORT.md").write_text("# FINAL_REPORT\n", encoding="utf-8")
+    (r2a / "FINAL_DECISION.json").write_text('{"final_status":"completed_with_failure"}', encoding="utf-8")
+    (r2a / "TASK_SPEC.md").write_text("# TASK_SPEC\n", encoding="utf-8")
+
+    state = make_initial_state(tmp_path, auto_iterate=True, max_iterations=8)
+    state.update(
+        {
+            "iteration": 8,
+            "reviewer_executed": False,
+            "reviewer_verdict": "",
+            "review_report_path": "",
+            "review_feedback_path": "",
+            "current_reproduction_level": "L4_reduced_paper_aligned",
+            "current_level_iteration": 7,
+            "iteration_history": [
+                {
+                    "iteration": iteration,
+                    "task_spec": f"iter_{iteration:03d}/TASK_SPEC.md",
+                    "review_report": f"iter_{iteration:03d}/REVIEW_REPORT.md",
+                    "review_feedback": f"iter_{iteration:03d}/REVIEW_FEEDBACK.json",
+                    "reviewer_verdict": "PASS_REDUCED_ALIGNED",
+                    "archive_missing_files": [],
+                }
+                for iteration in range(1, 8)
+            ],
+        }
+    )
+
+    archived = archive_final_iteration(state)
+    iteration_state = json.loads((r2a / "ITERATION_STATE.json").read_text(encoding="utf-8"))
+
+    assert (r2a / "runs" / "final" / "FINAL_REPORT.md").exists()
+    assert not (r2a / "runs" / "iter_008" / "FINAL_REPORT.md").exists()
+    assert [item["iteration"] for item in archived["iteration_history"]] == list(range(1, 8))
+    assert iteration_state["current_iteration"] == 8
+    assert iteration_state["current_iteration_complete"] is False
+    assert iteration_state["completed_review_iterations"] == 7
 
 
 def _write_minimal_inputs(repo: Path) -> Path:

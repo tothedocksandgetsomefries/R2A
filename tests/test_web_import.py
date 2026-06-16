@@ -717,6 +717,28 @@ def test_web_openclaw_status_model_reports_config_and_stage_profiles(tmp_path, m
     assert "Final Writer / Report Writer" in [label for _, label in app.OPENCLAW_MODEL_STAGE_LABELS]
 
 
+def test_web_openclaw_path_guidance_covers_no_wsl_and_template_fallback() -> None:
+    import r2a_web.app as app
+
+    guidance = app._openclaw_path_guidance_markdown()
+
+    assert "Windows + WSL OpenClaw" in guidance
+    assert "Windows native OpenClaw" in guidance
+    assert "Linux/macOS native OpenClaw" in guidance
+    assert "No OpenClaw" in guidance
+    assert "`template` Final Writer" in guidance
+    assert "/home/r2auser/" not in guidance
+
+
+def test_web_openclaw_example_user_path_warning_flags_doc_example() -> None:
+    import r2a_web.app as app
+
+    assert "真实 WSL 用户名" in app._openclaw_example_path_warning(
+        "/home/r2auser/.openclaw/openclaw.json"
+    )
+    assert app._openclaw_example_path_warning("C:\\Tools\\openclaw.cmd", "/home/alice/.openclaw/openclaw.json") == ""
+
+
 def test_web_openclaw_status_model_refresh_rereads_detected_config(tmp_path, monkeypatch) -> None:
     import json
     import r2a_web.app as app
@@ -930,8 +952,8 @@ def test_web_is_placeholder_config_path_detects_common_patterns() -> None:
     assert app._is_placeholder_config_path("C:\\Users\\<user>\\.openclaw\\openclaw.json") is True
     assert app._is_placeholder_config_path("/home/<user>/.openclaw/openclaw.json") is True
     # Should accept real paths with short usernames like 'x'
-    assert app._is_placeholder_config_path("/home/user/.openclaw/openclaw.json") is False
-    assert app._is_placeholder_config_path("/home/r2auser/.openclaw/openclaw.json") is False
+    assert app._is_placeholder_config_path("/home/x/.openclaw/openclaw.json") is False
+    assert app._is_placeholder_config_path("/home/r2auser/.openclaw/openclaw.json") is True
     assert app._is_placeholder_config_path("") is True
     # Should reject quotes (copy-paste from example)
     assert app._is_placeholder_config_path('"/home/r2auser/.openclaw/openclaw.json"') is True
@@ -993,14 +1015,21 @@ def test_web_build_initial_state_uses_restored_stage_model_selection(tmp_path, m
     assert state["stage_model_selection"]["engineer"]["model"] == "deepseek-chat"
 
 
-def test_web_save_stage_model_defaults_accepts_path_with_successful_detection(tmp_path, monkeypatch) -> None:
-    """Test that detection success allows save even for short username paths."""
+def test_web_save_stage_model_defaults_rejects_doc_example_even_with_detection(tmp_path, monkeypatch) -> None:
+    """The documentation example user must not become a persisted default."""
     import r2a_web.app as app
 
     settings_path = tmp_path / "web_settings.json"
     monkeypatch.setattr(app, "WEB_SETTINGS_PATH", settings_path)
+    app._save_web_settings(
+        {
+            "settings_schema_version": app.WEB_SETTINGS_SCHEMA_VERSION,
+            "openclaw_executable_path": "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw",
+            "openclaw_config_path": "/home/x/.openclaw/openclaw.json",
+            "stage_model_selection": {"planner": {"provider": "saved", "model": "saved-model"}},
+        }
+    )
 
-    # Simulate successful detection for /home/r2auser/...
     detection_result = {
         "source": "openclaw_config",
         "config_read_path": "/home/r2auser/.openclaw/openclaw.json",
@@ -1013,9 +1042,146 @@ def test_web_save_stage_model_defaults_accepts_path_with_successful_detection(tm
         detection_result=detection_result,
     )
 
-    assert result["success"] is True
+    assert result["success"] is False
+    assert "/home/r2auser" in result["error"]
     loaded = app._load_web_settings()
-    assert loaded["openclaw_config_path"] == "/home/r2auser/.openclaw/openclaw.json"
+    assert loaded["openclaw_config_path"] == "/home/x/.openclaw/openclaw.json"
+    assert loaded["stage_model_selection"]["planner"]["model"] == "saved-model"
+
+
+def test_web_load_settings_ignores_doc_example_openclaw_paths(tmp_path, monkeypatch) -> None:
+    import json
+    import r2a_web.app as app
+
+    settings_path = tmp_path / "web_settings.json"
+    monkeypatch.setattr(app, "WEB_SETTINGS_PATH", settings_path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "settings_schema_version": app.WEB_SETTINGS_SCHEMA_VERSION,
+                "openclaw_executable_path": "/home/r2auser/.nvm/versions/node/v22.22.2/bin/openclaw",
+                "openclaw_config_path": "/home/r2auser/.openclaw/openclaw.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = app._load_web_settings()
+
+    assert loaded["openclaw_executable_path"] == ""
+    assert loaded["openclaw_config_path"] == ""
+
+
+def test_web_load_settings_preserves_real_short_wsl_user_paths(tmp_path, monkeypatch) -> None:
+    import r2a_web.app as app
+
+    settings_path = tmp_path / "web_settings.json"
+    monkeypatch.setattr(app, "WEB_SETTINGS_PATH", settings_path)
+    app._save_web_settings(
+        {
+            "settings_schema_version": app.WEB_SETTINGS_SCHEMA_VERSION,
+            "openclaw_executable_path": "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw",
+            "openclaw_config_path": "/home/x/.openclaw/openclaw.json",
+        }
+    )
+
+    loaded = app._load_web_settings()
+
+    assert loaded["openclaw_executable_path"] == "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw"
+    assert loaded["openclaw_config_path"] == "/home/x/.openclaw/openclaw.json"
+
+
+def test_web_save_stage_model_defaults_error_does_not_overwrite_existing_settings(tmp_path, monkeypatch) -> None:
+    import r2a_web.app as app
+
+    settings_path = tmp_path / "web_settings.json"
+    monkeypatch.setattr(app, "WEB_SETTINGS_PATH", settings_path)
+    app._save_web_settings(
+        {
+            "settings_schema_version": app.WEB_SETTINGS_SCHEMA_VERSION,
+            "openclaw_executable_path": "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw",
+            "openclaw_config_path": "/home/x/.openclaw/openclaw.json",
+            "stage_model_selection": {"planner": {"provider": "saved", "model": "saved-model"}},
+        }
+    )
+
+    result = app._save_stage_model_defaults(
+        {"planner": {"provider": "ai-coding-plan", "model": "glm-5"}},
+        openclaw_executable_path="openclaw",
+        openclaw_config_path="",
+    )
+
+    loaded = app._load_web_settings()
+
+    assert result["success"] is False
+    assert loaded["openclaw_executable_path"] == "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw"
+    assert loaded["openclaw_config_path"] == "/home/x/.openclaw/openclaw.json"
+    assert loaded["stage_model_selection"]["planner"]["model"] == "saved-model"
+
+
+def test_web_collect_settings_preserves_saved_openclaw_defaults_when_not_detected(monkeypatch) -> None:
+    import r2a_web.app as app
+
+    class FakeStreamlit:
+        session_state = {
+            "web_settings": {
+                "openclaw_executable_path": "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw",
+                "openclaw_config_path": "/home/x/.openclaw/openclaw.json",
+                "stage_model_selection": {
+                    "planner": {"provider": "ai-coding-plan", "model": "glm-5"},
+                    "engineer": {"provider": "deepseek", "model": "deepseek-chat"},
+                },
+            },
+            "setting_workspace_base_dir": "E:/R2A_WORKSPACES",
+            "setting_paper_backend": "openclaw_reader",
+            "setting_planner_backend": "openclaw",
+            "setting_engineer_executor": "openclaw",
+            "setting_manager_backend": "openclaw_review",
+            "setting_reviewer_backend": "openclaw",
+            "setting_final_writer_backend": "openclaw",
+        }
+
+    monkeypatch.setattr(app, "st", FakeStreamlit)
+
+    saved = app._collect_web_settings(
+        {},
+        {},
+        "",
+        "",
+        "/usr/local/bin/openclaw",
+        "/tmp/not-detected.json",
+        10800,
+    )
+
+    assert saved["openclaw_executable_path"] == "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw"
+    assert saved["openclaw_config_path"] == "/home/x/.openclaw/openclaw.json"
+    assert saved["stage_model_selection"]["planner"]["model"] == "glm-5"
+    assert saved["stage_model_selection"]["engineer"]["model"] == "deepseek-chat"
+
+
+def test_web_current_or_saved_stage_model_selection_preserves_saved_when_not_detected(monkeypatch) -> None:
+    import r2a_web.app as app
+
+    class FakeStreamlit:
+        session_state = {
+            "openclaw_stage_model_value_planner": {},
+            "openclaw_stage_model_value_engineer": {},
+        }
+
+    monkeypatch.setattr(app, "st", FakeStreamlit)
+
+    selection = app._current_or_saved_stage_model_selection(
+        {
+            "stage_model_selection": {
+                "planner": {"provider": "ai-coding-plan", "model": "glm-5"},
+                "engineer": {"provider": "deepseek", "model": "deepseek-chat"},
+            }
+        }
+    )
+
+    assert selection["planner"]["model"] == "glm-5"
+    assert selection["engineer"]["model"] == "deepseek-chat"
 
 
 def test_web_build_initial_state_serializes_final_writer_stage_model() -> None:
@@ -1396,6 +1562,49 @@ PASS_WITH_LIMITATIONS
     summary = app._final_summary_model(final_report, repo_path=tmp_path)
 
     assert summary["l4_alignment_summary"] == str(summary_path)
+
+
+def test_web_read_report_supports_l4_alignment_summary(tmp_path) -> None:
+    import r2a_web.app as app
+
+    summary_path = tmp_path / ".r2a" / "results" / "L4_ALIGNMENT_SUMMARY.md"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text("# L4_ALIGNMENT_SUMMARY\n\nok\n", encoding="utf-8")
+
+    assert "ok" in app.read_report(tmp_path, "l4_alignment_summary")
+
+
+def test_web_final_status_card_model_keeps_success_fields_visible() -> None:
+    import r2a_web.app as app
+
+    final_report = """# FINAL_REPORT
+
+## Final Status
+
+completed_success
+
+## Stop Reason
+
+MAX_ITERATIONS_REACHED
+
+## Final Verdict
+
+PASS_REDUCED_ALIGNED
+
+## Reproduction Level
+
+- Current: L4_reduced_paper_aligned
+- Observed Evidence Level: L4_reduced_paper_aligned
+- Accepted Level After Quality Gates: L4_reduced_paper_aligned
+"""
+
+    card = app._final_status_card_model(final_report, repo_path=None)
+
+    assert card["final_status"] == "completed_success"
+    assert card["accepted_level"] == "L4_reduced_paper_aligned"
+    assert card["observed_level"] == "L4_reduced_paper_aligned"
+    assert card["stop_reason"] == "MAX_ITERATIONS_REACHED"
+    assert card["is_failure"] is False
 
 
 def test_web_final_summary_model_distinguishes_accepted_observed_and_cap_reason() -> None:

@@ -6,6 +6,7 @@ from r2a.core.run_manifest import mark_stage_finished, mark_stage_started
 from r2a.agents.planner_agent import run_planner_agent
 from r2a.cli import _cli_final_summary
 from r2a.core.paths import report_path
+from r2a.tools.final_writer import build_template_final_narrative_cn
 from r2a.tools.workflow_decision import PAPER_STRUCTURED_KEYS
 from r2a.workflow.graph import build_workflow_graph
 from r2a.workflow.nodes import final_node, human_approval_node
@@ -19,9 +20,11 @@ def test_final_report_is_generated_with_iteration_summary(tmp_path: Path) -> Non
 
     final_report = Path(result["final_report_path"])
     text = final_report.read_text(encoding="utf-8")
+    assert text.startswith("# 最终复现报告摘要")
     assert "# FINAL_REPORT" in text
+    assert "## 第二层结构化 diagnostics" in text
     assert "## Run Summary" in text
-    assert "## Evidence Ladder" in text
+    assert "## 证据等级" in text
     assert "## Total Iterations" in text
     assert "## Stop Reason" in text
     assert "## Final Verdict" in text
@@ -40,6 +43,55 @@ def test_final_report_is_generated_with_iteration_summary(tmp_path: Path) -> Non
     assert data["openclaw"]["stage_profiles"]["engineer"]["model"] == "deepseek-chat"
     assert (tmp_path / ".r2a" / "latest" / "FINAL_REPORT.md").exists()
     assert (tmp_path / ".r2a" / "runs" / "iter_001" / "FINAL_REPORT.md").exists()
+
+
+def test_template_final_narrative_uses_human_first_layer_structure() -> None:
+    narrative = build_template_final_narrative_cn(
+        {
+            "final_decision": {
+                "formal_verdict": "PASS_REDUCED_ALIGNED",
+                "accepted_level": "L4_reduced_paper_aligned",
+                "observed_level": "L4_reduced_paper_aligned",
+                "target_level": "L4_reduced_paper_aligned",
+                "target_reached": True,
+                "final_status": "completed_success",
+                "stop_reason": "MAX_ITERATIONS_REACHED",
+            },
+            "reduced_metrics_summary": "\n".join(
+                [
+                    "- reduced_metrics_rows: 2",
+                    "- datasets: sift1m_reduced",
+                    "- methods: OpenClawIndex",
+                    "- metrics: recall, qps",
+                    "- command_manifest.csv present: yes",
+                ]
+            ),
+            "paper_alignment_summary": "\n".join(
+                [
+                    "- Mapped paper item(s): recall@10.",
+                    "- Alignment statuses: MATCH: 1, PARTIAL_MATCH: 1, MISMATCH: 0, NOT_AVAILABLE: 0.",
+                ]
+            ),
+            "l4_alignment_excerpt": "# L4_ALIGNMENT_SUMMARY\n\nClaim: reduced paper-aligned evidence.",
+            "command_manifest_summary": "- command_manifest_rows: 23\n- successful_commands: 22\n- failed_commands: 1",
+        }
+    )
+
+    assert narrative.startswith("# 最终复现报告摘要")
+    for heading in (
+        "## 1. 论文与任务概览",
+        "## 2. 本次运行做了什么",
+        "## 3. 实验范围与当前状态",
+        "## 4. 实验结果摘要",
+        "## 5. 论文对齐情况",
+        "## 6. 最终结论",
+        "## 7. 推荐查看文件",
+    ):
+        assert heading in narrative
+    assert "| 方法 | 数据集 | 指标 | 关键结果 | 证据文件 |" in narrative
+    assert "| OpenClawIndex | sift1m_reduced | recall, qps | reduced_metrics_rows: 2; command_manifest.csv present: yes |" in narrative
+    assert "| MATCH | 1 |" in narrative
+    assert "`FINAL_DECISION.json` 为准" in narrative
 
 
 def test_final_report_includes_source_input_and_reduced_experiment_summaries(tmp_path: Path) -> None:
@@ -65,7 +117,7 @@ def test_final_report_includes_source_input_and_reduced_experiment_summaries(tmp
     result = final_node(state)
 
     text = Path(result["final_report_path"]).read_text(encoding="utf-8")
-    assert "## Inputs And Source" in text
+    assert "## 输入与源码" in text
     assert "source_status: available" in text
     assert "candidate_types: official_implementation_repo: 1" in text
     assert "input_contract_rows: 7" in text
@@ -358,8 +410,17 @@ def test_final_report_l4_limited_evidence_with_needs_fix_gets_cleanup_status(tmp
     _write_check(tmp_path, "WARNING", warnings="- closure cleanup warning\n")
     state = _state_with_paper(tmp_path, auto_iterate=True, max_iterations=2)
 
-    # Reviewer removed: test L4 with WARNING and max_iterations reached
-    result = final_node({**state, "iteration": 2, "manager_status": "WARNING"})
+    result = final_node(
+        {
+            **state,
+            "iteration": 2,
+            "manager_status": "WARNING",
+            "reviewer_executed": True,
+            "reviewer_verdict": "PASS_REDUCED_ALIGNED",
+            "current_reproduction_level": "L4_reduced_paper_aligned",
+            "current_level_iteration": 2,
+        }
+    )
 
     text = Path(result["final_report_path"]).read_text(encoding="utf-8")
     assert result["decision_status"]["typed_decision"] == "final"

@@ -75,6 +75,7 @@ from r2a_web.workspace_state import (
 
 REPORTS = [
     ("Final 最终报告", "final"),
+    ("L4 对齐证据包", "l4_alignment_summary"),
     ("Reviewer 评审报告", "review"),
     ("Reviewer 机器判定", "review_verdict"),
     ("Manager 检查报告", "check"),
@@ -248,7 +249,10 @@ OPENCLAW_STAGE_BACKEND_DEFAULTS = {
 
 
 def read_report(repo_path: str | Path, name: str) -> str:
-    path = report_path(repo_path, name)
+    if name == "l4_alignment_summary":
+        path = Path(repo_path) / ".r2a" / "results" / "L4_ALIGNMENT_SUMMARY.md"
+    else:
+        path = report_path(repo_path, name)
     if not path.exists():
         return "Not generated yet."
     return path.read_text(encoding="utf-8", errors="replace")
@@ -631,7 +635,7 @@ def main() -> None:
                 "manager_backend": manager_backend,
                 "reviewer_backend": reviewer_backend,
                 "final_writer_backend": final_writer_backend,
-                "stage_model_selection": _collect_stage_model_selection_from_session(),
+                "stage_model_selection": _current_or_saved_stage_model_selection(settings),
                 "auto_approve": auto_approve,
                 "output_language": output_language,
                 "auto_iterate": auto_iterate,
@@ -675,10 +679,6 @@ def main() -> None:
         _show_iteration_history()
 
     with st.container(border=True):
-        st.subheader("阶段报告")
-        _show_reports()
-
-    with st.container(border=True):
         st.subheader("Engineer Results")
         _show_engineer_results()
 
@@ -703,6 +703,9 @@ def _init_state() -> None:
     st.session_state.setdefault("claude_cli_check", None)
     st.session_state.setdefault("workflow_running", False)
     st.session_state.setdefault("active_run_id", "")
+    st.session_state.setdefault("run_created_this_session", False)  # Track if run was created this session
+    st.session_state.setdefault("loaded_historical_run", False)  # Track if user explicitly loaded historical run
+    st.session_state.setdefault("recovered_active_run", False)  # Track active runs recovered from runtime state
     st.session_state.setdefault("workflow_thread", None)
     if "web_settings" not in st.session_state:
         st.session_state.web_settings = _load_web_settings()
@@ -730,34 +733,98 @@ def _show_planner_backend_preflight(planner_backend: str) -> None:
         st.error(f"Planner backend ready = false ({message})")
 
 
+def _openclaw_path_guidance_markdown() -> str:
+    return "\n".join(
+        [
+            "路径填写说明：",
+            "- Windows + WSL OpenClaw：填写真实 WSL 用户下的 POSIX executable/config path；Windows UI 会在检测配置时尝试对应 UNC read path。",
+            "- Windows native OpenClaw：填写 Windows 可执行文件路径或 PATH 命令，例如 `openclaw.cmd` / npm global bin。",
+            "- Linux/macOS native OpenClaw：填写 `which openclaw` 返回的 executable path，并填写本机 OpenClaw config path。",
+            "- No OpenClaw：OpenClaw stages 不可用；`template` Final Writer 可继续生成报告，但 Planner/Engineer/Reviewer 仍需要可用 backend。",
+        ]
+    )
+
+
+def _openclaw_example_path_warning(*paths: str) -> str:
+    for path in paths:
+        normalized = str(path or "").replace("\\", "/").lower()
+        if "/home/r2auser/" in normalized:
+            return "路径包含 `/home/r2auser/`，这可能是文档示例路径；请确认真实 WSL 用户名后再保存。"
+    return ""
+
+
+def _is_openclaw_doc_example_path(path: str) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/").lower()
+    return "/home/r2auser/" in normalized
+
+
+def _openclaw_persisted_path_value(path: object) -> str:
+    text = str(path or "").strip()
+    return "" if _is_openclaw_doc_example_path(text) else text
+
+
+def _openclaw_saved_paths_for_ui(settings: dict | None) -> tuple[str, str, list[str]]:
+    settings = settings if isinstance(settings, dict) else {}
+    raw_executable = str(settings.get("openclaw_executable_path", "") or "").strip()
+    raw_config = str(settings.get("openclaw_config_path", "") or "").strip()
+    executable = _openclaw_persisted_path_value(raw_executable)
+    config = _openclaw_persisted_path_value(raw_config)
+    warnings: list[str] = []
+    if raw_executable and not executable:
+        warnings.append("Saved OpenClaw executable path looks like a documentation example and is ignored until a real path is saved.")
+    if raw_config and not config:
+        warnings.append("Saved OpenClaw config path looks like a documentation example and is ignored until a real path is saved.")
+    return executable, config, warnings
+
+
+def _current_or_saved_stage_model_selection(settings: dict | None) -> dict[str, dict[str, str]]:
+    saved: dict[str, dict[str, str]] = {}
+    if isinstance(settings, dict) and isinstance(settings.get("stage_model_selection"), dict):
+        saved = {
+            str(stage): {str(key): str(value) for key, value in entry.items() if value is not None}
+            for stage, entry in settings.get("stage_model_selection", {}).items()
+            if isinstance(entry, dict) and entry.get("provider") and entry.get("model")
+        }
+    current = _collect_stage_model_selection_from_session()
+    merged = dict(saved)
+    merged.update(current)
+    return merged
+
+
 def _show_openclaw_stage_profile_policy(settings: dict | None = None) -> tuple[str, str]:
     settings = settings if isinstance(settings, dict) else {}
-    # Load saved paths first - these will be used for detection
-    saved_executable = str(settings.get("openclaw_executable_path", "") or "").strip()
-    saved_config = str(settings.get("openclaw_config_path", "") or "").strip()
+    saved_executable, saved_config, saved_path_warnings = _openclaw_saved_paths_for_ui(settings)
+    for widget_key, saved_value in (
+        ("setting_openclaw_executable_path", saved_executable),
+        ("setting_openclaw_config_path", saved_config),
+    ):
+        if _is_openclaw_doc_example_path(str(st.session_state.get(widget_key, "") or "")):
+            st.session_state[widget_key] = saved_value
 
-    resolved = resolve_openclaw_config(
-        openclaw_executable_path=saved_executable or None,
-        openclaw_config_path=saved_config or None,
-    )
     st.caption("OpenClaw executable/config")
+    st.info(_openclaw_path_guidance_markdown())
+    for warning in saved_path_warnings:
+        st.warning(warning)
     openclaw_executable_path = st.text_input(
         "OpenClaw executable path",
-        value=saved_executable or str(resolved.get("openclaw_executable_path", "") or ""),
-        placeholder="openclaw, C:\\Tools\\openclaw.cmd, or /home/user/.nvm/.../openclaw",
-        help="Used for OpenClaw stage runtime and lightweight config validation. WSL/POSIX paths are verified by runtime preflight.",
+        value=saved_executable,
+        placeholder="openclaw, C:\\Tools\\openclaw.cmd, or /usr/local/bin/openclaw",
+        help="Used for OpenClaw stage runtime and lightweight config validation. Windows native, PATH commands, and POSIX paths are preserved as entered.",
         key="setting_openclaw_executable_path",
     )
     openclaw_config_path = st.text_input(
         "OpenClaw config path",
-        value=saved_config or str(resolved.get("openclaw_config_path", "") or ""),
-        placeholder="C:\\Users\\<user>\\.openclaw\\openclaw.json or /home/user/.openclaw/openclaw.json",
+        value=saved_config,
+        placeholder="C:\\Users\\Alice\\.openclaw\\openclaw.json or /home/alice/.openclaw/openclaw.json",
         help="Used to detect real OpenClaw model/profile entries. R2A also tries WSL UNC paths for POSIX config paths on Windows.",
         key="setting_openclaw_config_path",
     )
     # Use current input values for detection (not stale session state)
     current_executable = str(st.session_state.get("setting_openclaw_executable_path", openclaw_executable_path) or "").strip()
     current_config = str(st.session_state.get("setting_openclaw_config_path", openclaw_config_path) or "").strip()
+    example_path_warning = _openclaw_example_path_warning(current_executable, current_config)
+    if example_path_warning:
+        st.warning(example_path_warning)
 
     status = _openclaw_config_status_model(
         openclaw_executable_path=current_executable or None,
@@ -1084,11 +1151,13 @@ def _save_stage_model_defaults(
 
     # Validate executable path
     executable = str(openclaw_executable_path or "").strip()
-    if not executable:
-        executable = "openclaw"  # Default to PATH command
+    if _is_openclaw_doc_example_path(executable):
+        errors.append("OpenClaw executable path appears to be the documentation example `/home/r2auser/...`; please save the real WSL username path.")
 
     # Validate config path - prioritize detection success over placeholder check
     config = str(openclaw_config_path or "").strip()
+    if _is_openclaw_doc_example_path(config):
+        errors.append("OpenClaw config path appears to be the documentation example `/home/r2auser/...`; please save the real WSL username path.")
 
     # If detection was successful, trust that path even if it looks like placeholder
     detection_ok = False
@@ -1102,11 +1171,13 @@ def _save_stage_model_defaults(
         elif detection_result.get("config_read_path") and detection_result.get("models"):
             detection_ok = True
 
+    if errors:
+        return {"success": False, "error": " ".join(errors)}
+
     if not config:
         errors.append("OpenClaw config path is not configured; model detection cannot restore saved defaults.")
     elif not detection_ok and _is_placeholder_config_path(config):
         errors.append("OpenClaw config path appears to be a placeholder; please provide a real config path.")
-        config = ""
     elif not detection_ok:
         # Detection failed but path doesn't look like placeholder - still warn
         detection_errors = list(detection_result.get("model_detection_errors", []) or []) if isinstance(detection_result, dict) else []
@@ -1134,13 +1205,19 @@ def _save_stage_model_defaults(
         }
 
     if not defaults and not errors:
-        warnings.append("No valid stage model selection to save.")
+        warnings.append("No valid stage model selection to save; existing saved model selection was preserved.")
+
+    if errors:
+        return {"success": False, "error": " ".join(errors), **({"warning": " ".join(warnings)} if warnings else {})}
 
     # Load existing settings and update
     settings = _load_web_settings()
     settings["openclaw_executable_path"] = executable
     settings["openclaw_config_path"] = config
-    settings["stage_model_selection"] = defaults
+    if defaults:
+        settings["stage_model_selection"] = defaults
+    else:
+        settings["stage_model_selection"] = dict(settings.get("stage_model_selection", {}) or {})
     # Preserve other non-sensitive settings
     if "auto_refresh_interval_seconds" in settings:
         pass  # Keep existing value
@@ -1159,17 +1236,20 @@ def _is_placeholder_config_path(path: str) -> bool:
     """Check if config path looks like a placeholder example.
 
     Only rejects paths with explicit placeholder markers like <user> or example usernames.
-    Does NOT reject real paths like /home/r2auser/.openclaw/openclaw.json.
+    R2A documentation previously used /home/r2auser/... as an example path, so the
+    Web UI treats that path as an example rather than a real persisted default.
 
     This function checks for explicit placeholder patterns that indicate
     the path is an example/template rather than a real user path.
 
     Important: WSL usernames can be short (x, a, u, dev, etc.) and should
-    NOT be rejected. Only explicit placeholder markers should be rejected.
+    NOT be rejected.
     """
     text = str(path).strip()
     lowered = text.lower()
     if not text:
+        return True
+    if _is_openclaw_doc_example_path(text):
         return True
 
     # 1. Explicit placeholder markers (clear indicators of example text)
@@ -1389,11 +1469,11 @@ def _collect_web_settings(
         "final_writer_backend": st.session_state.get("setting_final_writer_backend", DEFAULT_FINAL_WRITER_BACKEND),
         "codex_executable_path": codex_executable_path,
         "claude_executable_path": claude_executable_path,
-        "openclaw_executable_path": openclaw_executable_path,
-        "openclaw_config_path": openclaw_config_path,
+        "openclaw_executable_path": existing_settings.get("openclaw_executable_path", ""),
+        "openclaw_config_path": existing_settings.get("openclaw_config_path", ""),
         "codex_stage_timeout": int(codex_stage_timeout),
         "auto_refresh_interval_seconds": int(st.session_state.get("auto_refresh_interval_seconds", 0) or 0),
-        "stage_model_selection": _collect_stage_model_selection_from_session(),
+        "stage_model_selection": dict(existing_settings.get("stage_model_selection", {}) or {}),
         "stage_api_keys": stage_api_keys,
         "stage_api_key_env_vars": stage_api_key_env_vars,
     }
@@ -1445,8 +1525,8 @@ def _normalize_web_settings(settings: dict) -> dict:
     normalized["engineer_execution_environment"] = engineer_environment
     normalized["wsl_distro"] = str(normalized.get("wsl_distro", DEFAULT_WSL_DISTRO) or DEFAULT_WSL_DISTRO)
     normalized["wsl_cache_dir"] = str(normalized.get("wsl_cache_dir", DEFAULT_WSL_CACHE_DIR) or DEFAULT_WSL_CACHE_DIR)
-    normalized["openclaw_executable_path"] = str(normalized.get("openclaw_executable_path", "") or "")
-    normalized["openclaw_config_path"] = str(normalized.get("openclaw_config_path", "") or "")
+    normalized["openclaw_executable_path"] = _openclaw_persisted_path_value(normalized.get("openclaw_executable_path", ""))
+    normalized["openclaw_config_path"] = _openclaw_persisted_path_value(normalized.get("openclaw_config_path", ""))
     normalized["auto_refresh_interval_seconds"] = 0
     stage_backends = _stage_backends_from_settings(normalized)
     stage_model_selection = normalized.get("stage_model_selection", {})
@@ -1520,6 +1600,9 @@ def _restore_run(run: dict) -> None:
     st.session_state.active_run_id = latest_run_id(run.get("repo_path", ""))
     st.session_state.workflow_result = {}
     st.session_state.workflow_error = ""
+    st.session_state.loaded_historical_run = True  # User explicitly loaded historical run
+    st.session_state.run_created_this_session = False
+    st.session_state.recovered_active_run = False
 
 
 def _create_workspace_clicked(
@@ -1574,6 +1657,9 @@ def _create_workspace_clicked(
     st.session_state.workflow_error = ""
     st.session_state.active_run_id = ""
     st.session_state.workflow_running = False
+    st.session_state.run_created_this_session = False  # New workspace, no run yet
+    st.session_state.loaded_historical_run = False  # Clear any loaded historical run
+    st.session_state.recovered_active_run = False
     st.success("Workspace created.")
 
 
@@ -1799,6 +1885,9 @@ def _start_workflow_background(**kwargs) -> None:
     st.session_state.workflow_running = True
     st.session_state.workflow_result = {}
     st.session_state.workflow_error = ""
+    st.session_state.run_created_this_session = True  # Mark that this run was created this session
+    st.session_state.loaded_historical_run = False  # Clear any loaded historical run
+    st.session_state.recovered_active_run = False
 
 
 def _workflow_background_worker(initial_state: dict, repo_path: str | Path, run_id: str, auto_iterate: bool, max_iterations: int) -> None:
@@ -2076,10 +2165,19 @@ def _maybe_autorefresh(interval_ms: int | None = None) -> None:
 def _show_run_control_panel() -> None:
     workspace = st.session_state.get("workspace")
     run_id = st.session_state.get("active_run_id", "")
-    if workspace and not run_id:
-        run_id = latest_run_id(workspace["repo_path"])
-        st.session_state.active_run_id = run_id
-    if not workspace or not run_id:
+
+    # Don't auto-load latest run on fresh startup
+    # Only show run control if run was created this session or explicitly loaded
+    run_created_this_session = st.session_state.get("run_created_this_session", False)
+    loaded_historical_run = st.session_state.get("loaded_historical_run", False)
+    recovered_active_run = st.session_state.get("recovered_active_run", False)
+
+    if not run_id or not (run_created_this_session or loaded_historical_run or recovered_active_run):
+        # Show empty state for run control
+        st.caption("当前没有运行中的 workflow / No active workflow run")
+        return
+
+    if not workspace:
         return
     repo_path = workspace["repo_path"]
     record = read_run_record(repo_path, run_id)
@@ -2676,23 +2774,399 @@ def _show_workflow_overview(auto_iterate: bool = DEFAULT_AUTO_ITERATE, max_itera
     result = st.session_state.workflow_result or {}
     if st.session_state.workflow_error:
         st.error(st.session_state.workflow_error)
-    _show_live_stage_activity(repo_path)
-    _show_stage_status()
-    if repo_path:
-        _show_workflow_data_sources(repo_path)
-    _show_iteration_control(auto_iterate, max_iterations)
-    if repo_path:
-        _show_manifest_summary(repo_path)
-    final_report = result.get("final_report") or (read_report(repo_path, "final") if repo_path else "")
+
+    # Only read final_report if run was created this session or explicitly loaded
+    run_created_this_session = st.session_state.get("run_created_this_session", False)
+    loaded_historical_run = st.session_state.get("loaded_historical_run", False)
+    recovered_active_run = st.session_state.get("recovered_active_run", False)
+
+    if result.get("final_report") or (run_created_this_session or loaded_historical_run or recovered_active_run):
+        final_report = result.get("final_report") or (read_report(repo_path, "final") if repo_path else "")
+    else:
+        final_report = ""  # Don't auto-load latest FINAL_REPORT on fresh startup
+
+    _show_final_status_card(final_report, repo_path=repo_path, result=result)
+
+    # Show concise stage status bar on main UI
+    _show_concise_stage_bar(repo_path, result)
+
+    # P1: Show latest historical run summary if present (but not as main status card)
+    _show_latest_historical_run_status(repo_path)
+
+    st.subheader("阶段报告")
+    _show_reports(default_key="final", include_history=False)
+
     if final_report and final_report != "Not generated yet.":
-        _show_final_summary(final_report, repo_path=repo_path)
-    if repo_path:
-        _show_approval_diagnostics(repo_path, result)
-    if repo_path:
-        quick = _quick_report_summary(repo_path)
-        if quick:
-            st.caption("关键结论")
-            st.write(quick)
+        summary = _final_summary_model(final_report, repo_path=repo_path)
+        _show_l4_alignment_summary_card(summary["l4_alignment_summary"])
+        _show_workflow_summary(summary)
+
+    with st.expander("Advanced diagnostics / 高级诊断", expanded=False):
+        _show_live_stage_activity(repo_path)
+        _show_stage_status()
+        if repo_path:
+            _show_workflow_data_sources(repo_path)
+        _show_iteration_control(auto_iterate, max_iterations)
+        if repo_path:
+            _show_manifest_summary(repo_path)
+            _show_approval_diagnostics(repo_path, result)
+            quick = _quick_report_summary(repo_path)
+            if quick:
+                st.caption("关键结论")
+                st.write(quick)
+
+
+def _show_final_status_card(final_report: str, repo_path: str | Path | None, result: dict) -> None:
+    """Display the appropriate status card based on run state.
+
+    Priority:
+    1. Active run (running/stopping/force_killing/failed_to_kill) -> runtime status card
+    2. Historical run (terminal status) -> historical status card
+    3. Completed run with final artifacts -> final status card
+    4. No run -> empty state
+    """
+    # P2: Check for active runtime status first
+    record = _active_run_record(repo_path) if repo_path else {}
+    record_status = str((record or {}).get("status", "") or "").lower()
+
+    # If run is actively running/stopping, show runtime status card
+    if record_status in {"running", "stopping", "force_killing", "failed_to_kill"}:
+        _show_runtime_status_card(record)
+        return
+
+    # Build final status card for completed/historical runs
+    card = _final_status_card_model(final_report, repo_path=repo_path, result=result)
+    if not card:
+        st.info("创建 workspace 并运行 workflow 后，这里会显示最终状态。")
+        return
+
+    # P1: Check if this is a historical run vs active/current run
+    is_historical = _is_historical_run_status(repo_path, result)
+    if is_historical:
+        _show_historical_status_card(card)
+        return
+
+    status_text = (
+        f"final_status: {card['final_status']} | "
+        f"verdict: {card['final_verdict']} | "
+        f"accepted: {card['accepted_level']} | observed: {card['observed_level']}"
+    )
+    if card["is_failure"]:
+        st.error(status_text)
+    elif "PASS" in card["final_verdict"].upper() or card["final_status"] == "completed_success":
+        st.success(status_text)
+    else:
+        st.info(status_text)
+
+    cols = st.columns(4)
+    cols[0].metric("Final status", card["final_status"])
+    cols[1].metric("Accepted level", card["accepted_level"])
+    cols[2].metric("Observed level", card["observed_level"])
+    cols[3].metric("Stop reason", card["stop_reason"])
+
+    failure_bits = []
+    if card["failed_stage"] != "-":
+        failure_bits.append(f"failed_stage={card['failed_stage']}")
+    if card["failure_category"] != "-":
+        failure_bits.append(f"failure_category={card['failure_category']}")
+    if card["is_failure"] and card["stop_reason"] != "-":
+        failure_bits.append(f"stop_reason={card['stop_reason']}")
+    if failure_bits:
+        st.warning("Failure details: " + " | ".join(failure_bits))
+
+
+def _final_status_card_model(final_report: str, repo_path: str | Path | None, result: dict | None = None) -> dict[str, str | bool]:
+    result = result or {}
+    summary = _final_summary_model(final_report, repo_path=repo_path) if final_report and final_report != "Not generated yet." else {}
+    manifest = read_latest_manifest(repo_path) if repo_path else {}
+    record = _active_run_record(repo_path) if repo_path else {}
+    failure_summary = _workflow_failure_summary_model(record, manifest)
+
+    # P1: Determine if we have an active/current run vs historical run
+    has_active_run = _has_active_or_current_run(repo_path, result, record)
+
+    # P1: If no active run and result is empty, don't show historical force_killed as current status
+    if not has_active_run and not result:
+        # Check if manifest/record have meaningful data for current run
+        manifest_status = str((manifest or {}).get("status", "") or "").strip()
+        record_status = str((record or {}).get("status", "") or "").strip()
+
+        # If both are terminal historical statuses, return empty to show neutral state
+        if manifest_status in {"force_killed", "cancelled", "stopped"} or record_status in {"force_killed", "cancelled", "stopped"}:
+            # Only show if there's actual final_report content with verdict
+            if not final_report or final_report == "Not generated yet.":
+                return {}
+
+    final_status = (
+        str(summary.get("final_status", "") or "").strip()
+        or str((manifest or {}).get("status", "") or "").strip()
+        or str((record or {}).get("status", "") or "").strip()
+        or str(result.get("loop_status", "") or result.get("status", "") or "").strip()
+        or "-"
+    )
+    final_verdict = str(summary.get("final_verdict", "") or result.get("reviewer_verdict", "") or "-").strip() or "-"
+    accepted_level = (
+        str(summary.get("accepted_level", "") or "").strip()
+        or str((manifest or {}).get("accepted_level", "") or (manifest or {}).get("achieved_level", "") or "").strip()
+        or str(result.get("current_reproduction_level", "") or "").strip()
+        or "-"
+    )
+    observed_level = (
+        str(summary.get("observed_level", "") or "").strip()
+        or str((manifest or {}).get("observed_level", "") or "").strip()
+        or str(result.get("current_reproduction_level", "") or "").strip()
+        or "-"
+    )
+    stop_reason = (
+        str(summary.get("stop_reason", "") or "").strip()
+        or str((manifest or {}).get("stop_reason", "") or (manifest or {}).get("termination_reason", "") or "").strip()
+        or str((record or {}).get("termination_reason", "") or (record or {}).get("error_code", "") or "").strip()
+        or "-"
+    )
+    failed_stage = (
+        str(failure_summary.get("failed_stage", "") or "").strip()
+        or str((manifest or {}).get("failed_stage", "") or "").strip()
+        or str((record or {}).get("failed_stage", "") or "").strip()
+        or "-"
+    )
+    failure_category = (
+        str(failure_summary.get("failure_category", "") or "").strip()
+        or str((manifest or {}).get("failure_category", "") or (manifest or {}).get("backend_failure_category", "") or "").strip()
+        or str((record or {}).get("error_code", "") or "").strip()
+        or "-"
+    )
+    is_failure = final_status in {"completed_with_failure", "failed", "force_killed", "stopped", "cancelled", "failed_to_kill"} or bool(failure_summary)
+    if not any(value and value != "-" for value in (final_status, final_verdict, accepted_level, observed_level, stop_reason, failed_stage, failure_category)):
+        return {}
+
+    # P1: Don't show card if verdict is empty and it's a historical run
+    if final_verdict == "-" and accepted_level == "-" and observed_level == "-":
+        return {}
+
+    return {
+        "final_status": _compact_display(final_status, 80),
+        "final_verdict": _compact_display(final_verdict, 80),
+        "accepted_level": _compact_display(accepted_level, 80),
+        "observed_level": _compact_display(observed_level, 80),
+        "stop_reason": _compact_display(stop_reason, 80),
+        "failed_stage": _compact_display(failed_stage, 80),
+        "failure_category": _compact_display(failure_category, 80),
+        "is_failure": is_failure,
+    }
+
+
+def _show_workflow_summary(summary: dict[str, str]) -> None:
+    rows = {
+        "Final verdict": summary.get("final_verdict", "-"),
+        "Detailed status": summary.get("detailed_status", "-"),
+        "Result type": summary.get("result_type", "-"),
+        "Full reproduction claim": summary.get("full_reproduction_claim", "-"),
+        "Target level": summary.get("target_level", "-"),
+        "Cap reason": summary.get("cap_reason", "-"),
+        "Next action": summary.get("next_action", "-"),
+    }
+    st.subheader("Workflow summary")
+    st.table(pd.DataFrame([rows]).T.rename(columns={0: "Summary"}))
+
+
+def _has_active_or_current_run(repo_path: str | Path | None, result: dict | None, record: dict | None) -> bool:
+    """Check if there's an active run or a current run in progress.
+
+    Returns True if:
+    - There's a non-empty result from current workflow execution
+    - There's an active run (running/stopping/force_killing status)
+    - The session has workflow_running=True
+    """
+    if not repo_path:
+        return bool(result)
+
+    # Check session state for active run
+    if st.session_state.get("workflow_running"):
+        return True
+
+    # Check if there's a result from current execution
+    if result and (result.get("status") or result.get("loop_status") or result.get("final_report")):
+        return True
+
+    # Check record status
+    if record:
+        record_status = str(record.get("status", "") or "").lower()
+        if record_status in {"running", "stopping", "force_killing", "failed_to_kill"}:
+            return True
+
+    # Check if there's an active_run_id in session
+    active_run_id = st.session_state.get("active_run_id", "")
+    if active_run_id and record:
+        return True
+
+    return False
+
+
+def _is_historical_run_status(repo_path: str | Path | None, result: dict | None) -> bool:
+    """Check if the status being shown is from a historical run, not current active run.
+
+    A status is considered historical if:
+    - There's no active run (workflow_running=False)
+    - No result from current execution
+    - The data comes from manifest/record of a previous run
+    """
+    if not repo_path:
+        return False
+
+    # If there's a current result, it's not historical
+    if result and (result.get("status") or result.get("loop_status") or result.get("final_report")):
+        return False
+
+    # If workflow is currently running, it's not historical
+    if st.session_state.get("workflow_running"):
+        return False
+
+    # Check if we have an active run
+    record = _active_run_record(repo_path) if repo_path else {}
+    if record:
+        record_status = str(record.get("status", "") or "").lower()
+        # If record is in active state, it's not historical
+        if record_status in {"running", "stopping", "force_killing", "failed_to_kill"}:
+            return False
+        # If record is terminal and no result, it's historical
+        if record_status in {"force_killed", "cancelled", "stopped", "completed", "completed_success", "completed_with_failure", "failed"}:
+            return True
+
+    # Check manifest
+    manifest = read_latest_manifest(repo_path) if repo_path else {}
+    if manifest:
+        manifest_status = str(manifest.get("status", "") or "").lower()
+        if manifest_status in {"force_killed", "cancelled", "stopped", "completed", "completed_success", "completed_with_failure", "failed"}:
+            return True
+
+    return False
+
+
+def _show_runtime_status_card(record: dict) -> None:
+    """Display runtime status for actively running workflows.
+
+    Shows current runtime status when the workflow is actively running,
+    without displaying final_status/accepted_level/observed_level/stop_reason
+    which are semantic for completed runs only.
+    """
+    status = str(record.get("status", "-") or "-").lower()
+    stage = str(record.get("current_stage", "-") or "-")
+    run_id = str(record.get("run_id", "-") or "-")
+    iteration = int(record.get("iteration", 1) or 1)
+    stage_status = str(record.get("stage_status", "") or "").lower()
+
+    # Display active run status
+    st.info(f"当前 workflow 正在运行 | status: {status} | stage: {stage} | run_id: {run_id[-12:] if len(run_id) > 12 else run_id}")
+
+    cols = st.columns(4)
+    cols[0].metric("Status", status)
+    cols[1].metric("Stage", stage)
+    cols[2].metric("Iteration", iteration)
+    cols[3].metric("Stage status", stage_status or "running")
+
+    # Show warning if any
+    warning = str(record.get("warning", "") or "")
+    if warning:
+        st.warning(warning)
+
+    # Inform user that final conclusion is pending
+    st.caption("最终结论将在 Reviewer / Final 阶段完成后生成。")
+
+
+def _show_historical_status_card(card: dict[str, str | bool]) -> None:
+    """Display a historical run status with clear labeling.
+
+    Shows historical run status in a neutral/secondary style,
+    clearly labeled as "历史运行状态" not current status.
+    """
+    st.caption("历史运行状态 / Historical run status")
+
+    status_text = (
+        f"final_status: {card['final_status']} | "
+        f"verdict: {card['final_verdict']} | "
+        f"accepted: {card['accepted_level']} | observed: {card['observed_level']}"
+    )
+
+    # Use warning/info for historical runs, not error even if failed
+    if card["is_failure"]:
+        st.warning(status_text)
+    else:
+        st.info(status_text)
+
+    cols = st.columns(4)
+    cols[0].metric("Final status", card["final_status"])
+    cols[1].metric("Accepted level", card["accepted_level"])
+    cols[2].metric("Observed level", card["observed_level"])
+    cols[3].metric("Stop reason", card["stop_reason"])
+
+    failure_bits = []
+    if card["failed_stage"] != "-":
+        failure_bits.append(f"failed_stage={card['failed_stage']}")
+    if card["failure_category"] != "-":
+        failure_bits.append(f"failure_category={card['failure_category']}")
+    if card["is_failure"] and card["stop_reason"] != "-":
+        failure_bits.append(f"stop_reason={card['stop_reason']}")
+    if failure_bits:
+        st.caption("Failure details: " + " | ".join(failure_bits))
+
+
+def _show_latest_historical_run_status(repo_path: str | Path | None) -> None:
+    """Show a brief summary of the latest historical run if no active run exists.
+
+    This is displayed in a secondary area, not the main status card.
+    Provides a button to explicitly load the historical run for viewing.
+    """
+    if not repo_path:
+        return
+
+    # Don't show if there's an active run
+    if st.session_state.get("workflow_running"):
+        return
+
+    # Don't show if run was created this session
+    run_created_this_session = st.session_state.get("run_created_this_session", False)
+    if run_created_this_session:
+        return
+
+    # Check for latest historical run
+    manifest = read_latest_manifest(repo_path) if repo_path else {}
+
+    manifest_status = str((manifest or {}).get("status", "") or "").lower()
+
+    # Check if it's a terminal historical status
+    if not manifest_status or manifest_status in {"running", "stopping", "force_killing", "failed_to_kill", ""}:
+        return
+
+    # Show brief historical run info
+    run_id = str((manifest or {}).get("run_id", "") or "")
+    stop_reason = str((manifest or {}).get("stop_reason", "") or "-")
+    current_stage = str((manifest or {}).get("current_stage", "") or "-")
+
+    # Show for all terminal statuses
+    with st.expander("最近一次运行 / Latest historical run", expanded=False):
+        st.caption(f"Run ID: {run_id[-12:] if len(run_id) > 12 else run_id}")
+        st.caption(f"Status: {manifest_status}")
+        st.caption(f"Stage: {current_stage}")
+        st.caption(f"Stop reason: {stop_reason}")
+
+        if manifest_status == "force_killed":
+            st.info("最近一次运行被中断。这并非当前运行状态。")
+        elif manifest_status == "cancelled":
+            st.info("最近一次运行被取消。")
+        elif manifest_status == "stopped":
+            st.info("最近一次运行被停止。")
+        elif manifest_status == "completed_with_failure":
+            st.warning("最近一次运行失败。点击下方按钮可查看详细报告。")
+        elif manifest_status == "completed_success":
+            st.success("最近一次运行成功。点击下方按钮可查看详细报告。")
+
+        # Add button to load historical run
+        if st.button("加载最近一次运行 / Load latest run", key="load_latest_historical_run"):
+            st.session_state.active_run_id = run_id
+            st.session_state.loaded_historical_run = True
+            st.session_state.run_created_this_session = False
+            st.session_state.recovered_active_run = False
+            st.rerun()
 
 
 def _show_web_runtime_header() -> None:
@@ -2811,11 +3285,23 @@ def _latest_stage_activity(repo_path: str | Path) -> dict[str, str]:
 
 
 def _active_run_record(repo_path: str | Path) -> dict:
+    """Get the active run record.
+
+    Only returns a record if:
+    1. There's an active_run_id in session state AND
+    2. The run was created this session OR user explicitly loaded a historical run
+
+    This prevents auto-loading old runs on fresh startup.
+    """
     if st is None:
         return {}
-    run_id = st.session_state.get("active_run_id", "") or latest_run_id(repo_path)
-    if run_id:
-        st.session_state.active_run_id = run_id
+    run_id = st.session_state.get("active_run_id", "")
+    # Only return record if run was created this session or explicitly loaded
+    run_created_this_session = st.session_state.get("run_created_this_session", False)
+    loaded_historical_run = st.session_state.get("loaded_historical_run", False)
+    recovered_active_run = st.session_state.get("recovered_active_run", False)
+
+    if run_id and (run_created_this_session or loaded_historical_run or recovered_active_run):
         return read_run_record(repo_path, run_id)
     return {}
 
@@ -3228,10 +3714,14 @@ def _show_l4_alignment_summary_card(summary_path: str) -> None:
     if not path.exists():
         st.warning(f"L4 alignment summary was referenced but is not readable: `{summary_path}`")
         return
-    st.info(f"L4 alignment package: `{path}`")
+    st.info(
+        "L4 对齐证据包：用于说明本次 reduced run 与论文设置之间哪些匹配、部分匹配、缺失。"
+        "它支撑 L4_reduced_paper_aligned 判定，但不是最终报告，也不替代 Reviewer verdict。"
+    )
+    st.caption(f"L4 alignment package path: `{path}`")
     text = path.read_text(encoding="utf-8", errors="replace")
     preview = _first_markdown_sections(text, max_sections=5)
-    with st.expander("L4 Summary preview", expanded=True):
+    with st.expander("L4 alignment summary preview / L4 对齐摘要预览", expanded=False):
         st.markdown(preview)
 
 
@@ -3303,6 +3793,253 @@ def _show_stage_status() -> None:
             key = _stage_report_key(stage)
             fallback_statuses[stage] = (_stage_status(repo_path, key, result), None)
         _show_stage_chip_row(stages, fallback_statuses, "Artifact stage chips source: report files")
+
+
+def _normalize_stage_status_for_ui(stage_status: str) -> str:
+    """Normalize stage status for UI display.
+
+    Maps various status labels to canonical UI states:
+    - Done: PASS, SUCCESS, APPROVED, OK, DONE, COMPLETED, COMPLETED_SUCCESS
+    - Failed: FAIL, FAILED, FAILURE, ERROR, COMPLETED_WITH_FAILURE,
+              REVIEWER_INVALID_VERDICT, REVIEWER_FEEDBACK_VALIDATION_FAILED
+    - Needs Fix: NEEDS_FIX
+    - Needs Input: NEEDS_INPUT_OR_BUDGET, NEEDS_OFFICIAL_INPUT
+    - Input Contract Ready: INPUT_CONTRACT_READY and related input-ready tokens
+    - Running: RUNNING, IN_PROGRESS
+    - Pending: PENDING, WAITING
+    - Skipped: SKIPPED, OMITTED
+    - Unknown: anything else
+    """
+    status = str(stage_status or "").strip().upper()
+
+    if status in {"PASS", "SUCCESS", "APPROVED", "OK", "DONE", "COMPLETED", "COMPLETED_SUCCESS"}:
+        return "Done"
+
+    if status in {
+        "FAIL",
+        "FAILED",
+        "FAILURE",
+        "ERROR",
+        "COMPLETED_WITH_FAILURE",
+        "REVIEWER_INVALID_VERDICT",
+        "REVIEWER_FEEDBACK_VALIDATION_FAILED",
+        "REVIEWER_SAFETY_VALIDATION_FAILED",
+        "REVIEWER_INPUT_INTEGRITY_BLOCKED_L3",
+    }:
+        return "Failed"
+
+    if status == "NEEDS_FIX":
+        return "Needs Fix"
+
+    if status in {"NEEDS_INPUT_OR_BUDGET", "NEEDS_OFFICIAL_INPUT", "NEEDS_INPUT"}:
+        return "Needs Input"
+
+    if status in {"INPUT_CONTRACT_READY", "INPUT_READY", "CONTRACT_READY", "REVIEW_INPUT_READY"}:
+        return "Input Contract Ready"
+
+    if status in {"RUNNING", "IN_PROGRESS"}:
+        return "Running"
+
+    if status in {"PENDING", "WAITING"}:
+        return "Pending"
+
+    if status in {"SKIPPED", "OMITTED"}:
+        return "Skipped"
+
+    return "Unknown"
+
+
+def _concise_stage_statuses_from_sources(
+    *,
+    runtime: dict | None = None,
+    manifest: dict | None = None,
+    record: dict | None = None,
+    result: dict | None = None,
+) -> dict[str, str]:
+    stages = WORKFLOW_STAGE_ORDER
+    statuses: dict[str, str] = {}
+    runtime = runtime if isinstance(runtime, dict) else {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    result = result if isinstance(result, dict) else {}
+
+    if runtime and isinstance(runtime.get("stages"), dict):
+        for stage, _label in stages:
+            info = runtime.get("stages", {}).get(stage, {})
+            raw_status = str(info.get("status", "pending") if isinstance(info, dict) else "pending")
+            statuses[stage] = _normalize_stage_status_for_ui(raw_status)
+    elif manifest and isinstance(manifest.get("stages"), dict):
+        for stage, _label in stages:
+            statuses[stage] = _stage_status_from_manifest(stage, manifest) or "Pending"
+    elif record:
+        statuses = _concise_stage_statuses_from_record(record)
+    else:
+        statuses = {stage: "-" for stage, _label in stages}
+
+    current_stage = (
+        str(result.get("current_stage", "") or "")
+        or str(record.get("current_stage", "") or "")
+        or str(manifest.get("current_stage", "") or "")
+    )
+    statuses = _adjust_concise_statuses_for_current_stage(statuses, current_stage)
+    if _workflow_failed_for_concise_bar(manifest=manifest, record=record, result=result):
+        statuses = dict(statuses)
+        statuses["final"] = "Failed"
+    return statuses
+
+
+def _workflow_failed_for_concise_bar(
+    *,
+    manifest: dict | None = None,
+    record: dict | None = None,
+    result: dict | None = None,
+) -> bool:
+    manifest = manifest if isinstance(manifest, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    decision_status = manifest.get("decision_status", {})
+    if not isinstance(decision_status, dict):
+        decision_status = {}
+    final_decision = manifest.get("final_decision", {})
+    if not isinstance(final_decision, dict):
+        final_decision = {}
+    failure_statuses = {
+        "cancelled",
+        "canceled",
+        "completed_with_failure",
+        "failed",
+        "failed_to_kill",
+        "force_killed",
+        "stopped",
+        "terminal_failed",
+    }
+    candidates = [
+        result.get("final_status"),
+        result.get("loop_status"),
+        result.get("status"),
+        manifest.get("final_status"),
+        manifest.get("loop_status"),
+        manifest.get("status"),
+        decision_status.get("typed_decision"),
+        decision_status.get("reason_code") if decision_status.get("typed_decision") == "terminal_failed" else "",
+        final_decision.get("final_status"),
+        record.get("status"),
+    ]
+    return any(str(item or "").strip().lower() in failure_statuses for item in candidates)
+
+
+def _concise_stage_statuses_from_record(record: dict) -> dict[str, str]:
+    current_stage = _display_stage_from_current_stage(record.get("current_stage", ""))
+    record_status = str(record.get("status", "") or "").lower()
+    if current_stage == "prepare_next_iteration":
+        return _prepare_next_iteration_concise_statuses()
+
+    statuses: dict[str, str] = {}
+    terminal = record_status in {
+        "cancelled",
+        "completed",
+        "completed_success",
+        "completed_with_failure",
+        "failed",
+        "failed_to_kill",
+        "force_killed",
+        "stopped",
+        "terminal_failed",
+    }
+    for stage, _label in WORKFLOW_STAGE_ORDER:
+        if stage == current_stage:
+            if record_status in {"running", "stopping"}:
+                statuses[stage] = "Running"
+            elif record_status in {"failed", "failed_to_kill", "completed_with_failure", "terminal_failed"}:
+                statuses[stage] = "Failed"
+            elif record_status in {"cancelled", "stopped", "force_killed"}:
+                statuses[stage] = record_status.replace("_", " ").title()
+            else:
+                statuses[stage] = "Running"
+        elif current_stage and _stage_before(stage, current_stage):
+            statuses[stage] = "Done"
+        elif terminal and current_stage and _stage_before(stage, current_stage):
+            statuses[stage] = "Done"
+        else:
+            statuses[stage] = "Pending"
+    return statuses
+
+
+def _adjust_concise_statuses_for_current_stage(statuses: dict[str, str], current_stage: object) -> dict[str, str]:
+    display_stage = _display_stage_from_current_stage(current_stage)
+    if display_stage != "prepare_next_iteration":
+        return statuses
+    adjusted = dict(statuses)
+    for stage in ("paper", "approval", "engineer", "manager", "reviewer"):
+        if adjusted.get(stage) in {"", "-", "Unknown", "Pending"}:
+            adjusted[stage] = "Done"
+    if adjusted.get("planner") in {"", "-", "Unknown", "Pending"}:
+        adjusted["planner"] = "Running"
+    if adjusted.get("final") in {"", "-", "Unknown"}:
+        adjusted["final"] = "Pending"
+    return adjusted
+
+
+def _prepare_next_iteration_concise_statuses() -> dict[str, str]:
+    return {
+        "paper": "Done",
+        "planner": "Running",
+        "approval": "Done",
+        "engineer": "Done",
+        "manager": "Done",
+        "reviewer": "Done",
+        "final": "Pending",
+    }
+
+
+def _display_stage_from_current_stage(current_stage: object) -> str:
+    text = str(current_stage or "").strip().lower()
+    if not text:
+        return ""
+    if text == "prepare_next_iteration_node":
+        return "prepare_next_iteration"
+    return NODE_TO_STAGE.get(text, text)
+
+
+def _show_concise_stage_bar(repo_path: str | None, result: dict) -> None:
+    """Show a concise stage status bar on the main UI.
+
+    Displays paper → planner → engineer → manager → reviewer → final stages
+    with their current status (pending/running/done/failed/skipped).
+    """
+    stages = WORKFLOW_STAGE_ORDER
+    manifest = read_latest_manifest(repo_path) if repo_path else {}
+    record = _active_run_record(repo_path) if repo_path else {}
+    runtime = st.session_state.get("stage_runtime") if st.session_state.get("workflow_running") else None
+    statuses = _concise_stage_statuses_from_sources(
+        runtime=runtime,
+        manifest=manifest,
+        record=record,
+        result=result,
+    )
+
+    # Render concise stage bar
+    st.caption("阶段进度 / Stage Progress")
+    cols = st.columns(len(stages))
+    for col, (stage, label) in zip(cols, stages):
+        status = statuses.get(stage, "-")
+        with col:
+            if status == "Done":
+                st.success(f"✓ {label}")
+            elif status == "Running":
+                st.info(f"▶ {label}")
+            elif status == "Failed":
+                st.error(f"✗ {label}")
+            elif status == "Skipped":
+                st.warning(f"∅ {label}")
+            elif status == "Pending":
+                st.caption(f"○ {label}")
+            elif status in {"Needs Fix", "Needs Input"}:
+                st.warning(f"! {label}: {status}")
+            elif status == "Input Contract Ready":
+                st.caption(f"○ {label}: {status}")
+            else:
+                st.caption(f"? {label}")
 
 
 def _show_stage_chip_row(stages, statuses: dict[str, tuple[str, object]], source_caption: str) -> None:
@@ -3450,18 +4187,27 @@ def _stage_status_from_manifest(stage: str, manifest: dict) -> str:
             return "Running"
         if _stage_before(stage, current) and raw in {"", "PENDING"}:
             return "Done"
-    if raw in {"PASS", "SUCCESS", "WARNING"}:  # SUCCESS is valid status from RUN_MANIFEST
+    if raw in {"PASS", "SUCCESS", "APPROVED", "WARNING"}:  # SUCCESS is valid status from RUN_MANIFEST
         if stage == "final" and str(manifest.get("status", "") or "") == "completed_with_failure":
             return "Failure Report"
         if stage == "final":
             return "Final Report"
         return "Done" if stage != "manager" else ("Capped" if _manifest_manager_capped(manifest) else "Done")
-    if raw in {"FAIL", "FAILED"}:
+    if raw in {
+        "FAIL",
+        "FAILED",
+        "REVIEWER_INVALID_VERDICT",
+        "REVIEWER_FEEDBACK_VALIDATION_FAILED",
+        "REVIEWER_SAFETY_VALIDATION_FAILED",
+        "REVIEWER_INPUT_INTEGRITY_BLOCKED_L3",
+    }:
         return "Failed"
     if raw in {"REJECT", "REJECTED"}:
         return "Rejected"
     if raw in {"NEEDS_FIX", "NEEDS_INPUT", "NEEDS_OFFICIAL_INPUT", "NEEDS_INPUT_OR_BUDGET", "BORDERLINE"}:
         return raw.replace("_", " ").title()
+    if raw in {"INPUT_CONTRACT_READY", "INPUT_READY", "CONTRACT_READY", "REVIEW_INPUT_READY"}:
+        return "Input Contract Ready"
     if raw in {"SKIPPED", "NOT_RUN", "BLOCKED"}:
         return raw.replace("_", " ").title()
     if raw == "RUNNING":
@@ -3931,13 +4677,16 @@ def _render_result_html(paths: list[Path], repo_path: str | Path) -> None:
             st.code(path.read_text(encoding="utf-8", errors="replace")[:12000], language="html")
 
 
-def _show_reports() -> None:
+def _show_reports(*, default_key: str = "final", include_history: bool = True) -> None:
     repo_path = _repo_path()
-    selected_label = st.selectbox("选择报告", [label for label, _ in REPORTS])
+    labels = [label for label, _ in REPORTS]
+    keys = [key for _, key in REPORTS]
+    default_index = keys.index(default_key) if default_key in keys else 0
+    selected_label = st.selectbox("选择报告", labels, index=default_index, key="workflow_review_report_selector")
     selected_key = dict(REPORTS)[selected_label]
     st.markdown(read_report(repo_path, selected_key) if repo_path else "Not generated yet.")
 
-    if repo_path:
+    if include_history and repo_path:
         runs_path = Path(repo_path) / ".r2a" / "runs"
         if runs_path.exists():
             st.subheader("历史迭代报告")

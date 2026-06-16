@@ -1,6 +1,12 @@
-# FINAL_REPORT / R2A 复现最终报告
+{{final_narrative_cn}}
+
+---
+
+## 第二层结构化 diagnostics
 
 Generated at: {{generated_at}}
+
+### FINAL_REPORT / R2A 复现最终报告
 
 ## Run Summary
 
@@ -12,45 +18,41 @@ Generated at: {{generated_at}}
 
 {{final_decision_summary}}
 
-## Final Writer / Report Writer
+## Final Writer / 报告撰写器
 
 {{final_writer_summary}}
 
-## 中文叙述
-
-{{final_narrative_cn}}
-
-## Decision Status
+## 决策状态
 
 {{decision_status_summary}}
 
-## User Hints / Source Provenance Notes
+## 用户提示 / 源码来源说明
 
 {{user_hints_summary}}
 
-## Inputs And Source
+## 输入与源码
 
-### Source Acquisition
+### 源码获取
 
 {{source_acquisition_summary}}
 
-### Input Data / Contract
+### 输入数据 / 契约
 
 {{input_data_summary}}
 
-### Executed Reduced Experiments
+### 已执行的缩减实验
 
 {{executed_reduced_experiments}}
 
-## Evidence Ladder
+## 证据等级
 
 {{evidence_ladder}}
 
-## Blocking Reasons
+## 阻塞原因
 
 {{evidence_blocking_reasons}}
 
-## Key Outputs
+## 关键输出
 
 {{key_outputs}}
 

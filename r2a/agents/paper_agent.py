@@ -25,6 +25,14 @@ from r2a.tools.wsl import windows_to_wsl_path
 
 PAPER_TEXT_LIMIT = 200000
 PAPER_CONTEXT_EXCERPT_LIMIT = 5000
+CAPTION_ONLY_LOW_CONFIDENCE_WARNING = (
+    "Some paper figures were parsed as caption-only; exact plotted values were not structurally extracted. "
+    "This may affect figure-level numeric alignment evidence, but does not restrict Planner scope."
+)
+LOCAL_FALLBACK_LOW_CONFIDENCE_WARNING = (
+    "Paper quality gate marked LOW_CONFIDENCE because local fallback or incomplete extraction was used; "
+    "treat extracted paper facts as verification/discovery context until a structured paper bundle is available."
+)
 
 
 def run_paper_agent(state: R2AState, *, force: bool = True) -> R2AState:
@@ -183,7 +191,7 @@ def run_paper_claude_reader(state: R2AState, *, force: bool = True) -> R2AState:
     paper_quality = "PARTIAL"
     if "LOW_CONFIDENCE" in parse_quality_text or "caption_only" in parse_quality_text:
         paper_quality = "LOW_CONFIDENCE"
-        warnings.append("Paper parse quality indicates LOW_CONFIDENCE; Planner scope may be restricted.")
+        warnings.append(CAPTION_ONLY_LOW_CONFIDENCE_WARNING)
 
     # Return updated state with Paper outputs
     return {
@@ -336,7 +344,7 @@ def run_paper_openclaw_reader(state: R2AState, *, force: bool = True) -> R2AStat
     paper_quality = "PARTIAL"
     if "LOW_CONFIDENCE" in parse_quality_text or "caption_only" in parse_quality_text:
         paper_quality = "LOW_CONFIDENCE"
-        warnings.append("Paper parse quality indicates LOW_CONFIDENCE; Planner scope may be restricted.")
+        warnings.append(CAPTION_ONLY_LOW_CONFIDENCE_WARNING)
 
     return {
         **state,
@@ -424,7 +432,7 @@ def run_paper_ai_reader(state: R2AState, *, force: bool = True) -> R2AState:
     backend = state.get("paper_backend", "ai_reader")
     warning = (
         f"Paper backend `{backend}` is now text-only; Claude Code/Codex Tool Call reader is disabled. "
-        "Local preprocess fallback used and Planner scope is restricted."
+        "Local preprocess fallback used; extracted paper facts are verification/discovery context until a structured paper bundle is available."
     )
     fallback = generate_paper_brief(
         {
@@ -438,7 +446,10 @@ def run_paper_ai_reader(state: R2AState, *, force: bool = True) -> R2AState:
     repo = require_repo_dir(state["repo_path"])
     for path in _paper_output_paths(repo).values():
         if path.suffix.lower() == ".md":
-            _append_note(path, "Paper AI summarizer was not used; local fallback used. Planner scope has been restricted.")
+            _append_note(
+                path,
+                "Paper AI summarizer was not used; local fallback used. Treat extracted paper facts as verification/discovery context until a structured paper bundle is available.",
+            )
     return {
         **fallback,
         "paper_backend": "local_preprocess_fallback",
@@ -582,7 +593,11 @@ def generate_paper_brief(state: R2AState, *, force: bool = True) -> R2AState:
     _write_paper_analysis_cn(repo, force=force)
     warnings = list(state.get("warnings", []))
     if paper_output.parse_quality == "LOW_CONFIDENCE":
-        warnings.append("Paper quality gate marked LOW_CONFIDENCE; Planner scope must be restricted to verification/discovery.")
+        warnings.append(
+            CAPTION_ONLY_LOW_CONFIDENCE_WARNING
+            if _parse_quality_indicates_caption_only(parse_quality_body)
+            else LOCAL_FALLBACK_LOW_CONFIDENCE_WARNING
+        )
     return {
         **state,
         "warnings": warnings,
@@ -818,6 +833,10 @@ def _paper_quality_reasons(structure: dict, extraction: dict, parse_quality_body
     if any(token in extraction.get("text", "") for token in ("鈥", "眉", "铿", "饾")):
         reasons.append("Extracted text contains encoding/order artifacts consistent with difficult PDF extraction.")
     return reasons
+
+
+def _parse_quality_indicates_caption_only(parse_quality_body: str) -> bool:
+    return "caption_only" in str(parse_quality_body or "")
 
 
 def _paper_evidence_gaps(reasons: list[str], parse_quality_body: str) -> list[str]:

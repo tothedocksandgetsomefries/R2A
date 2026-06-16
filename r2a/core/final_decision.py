@@ -173,17 +173,17 @@ def _final_status(
     state: dict[str, Any],
 ) -> str:
     typed = str(decision_status.get("typed_decision", "") or "").strip()
-    if target_reached:
-        return "completed_success"
     if typed in {"terminal_failed", "request_paper", "request_source", "request_dataset", "request_approval"}:
         return "completed_with_failure"
+    loop_status = str(state.get("loop_status", "") or "")
+    if loop_status in {"failed", "completed_with_failure", "planner_failed"}:
+        return "completed_with_failure"
+    if target_reached:
+        return "completed_success"
     if stop_reason == "MAX_ITERATIONS_REACHED":
         return "completed_with_failure"
     if accepted_valid:
         return "completed_with_limitations"
-    loop_status = str(state.get("loop_status", "") or "")
-    if loop_status in {"failed", "completed_with_failure", "planner_failed"}:
-        return "completed_with_failure"
     return "completed_with_failure"
 
 

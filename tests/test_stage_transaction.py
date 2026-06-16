@@ -415,6 +415,63 @@ def test_reviewer_input_integrity_blocker_rejects_l3_l4_verdict(tmp_path: Path) 
     assert metadata["execution_status"] == "REVIEWER_INPUT_INTEGRITY_BLOCKED_L3"
 
 
+def test_reviewer_allows_l3_l4_when_only_paper_reference_dataset_is_missing(tmp_path: Path) -> None:
+    results = tmp_path / ".r2a" / "results"
+    results.mkdir(parents=True)
+    (results / "input_contract_verification.csv").write_text(
+        "component,status,path_or_command,evidence_source,notes\n"
+        "sift1m_dataset,AVAILABLE,sift_base.fvecs,official,SIFT1M reduced target dataset\n"
+        "sift1m_query,AVAILABLE,sift_query.fvecs,official,SIFT1M reduced target query\n"
+        "sift1m_groundtruth,AVAILABLE,sift_groundtruth.ivecs,official,SIFT1M reduced target ground truth\n"
+        "dataset_Paper,NEEDS_INPUT,,PAPER_EVIDENCE.md,"
+        "2,029,997 vectors, 200 dim, 12 predicates. Internal corpus; may not be publicly available.\n",
+        encoding="utf-8",
+    )
+    staging = reviewer_staging_dir(tmp_path, 1, 1)
+    started = time.time()
+    _write_valid_reviewer_candidate(staging, "PASS_REDUCED_ALIGNED")
+
+    metadata = validate_reviewer_transaction(
+        tmp_path,
+        staging,
+        {"success": True, "returncode": 0, "unexpected_modifications": []},
+        iteration=1,
+        attempt_started_at=started,
+    )
+
+    assert metadata["validation_status"] == "PASS"
+    assert metadata["candidate_verdict"] == "PASS_REDUCED_ALIGNED"
+    assert metadata["input_integrity_status"] == "OK"
+
+
+def test_reviewer_rejects_l3_l4_when_paper_dataset_is_explicitly_target_required(tmp_path: Path) -> None:
+    results = tmp_path / ".r2a" / "results"
+    results.mkdir(parents=True)
+    (results / "input_contract_verification.csv").write_text(
+        "component,status,path_or_command,evidence_source,notes,target_required\n"
+        "sift1m_dataset,AVAILABLE,sift_base.fvecs,official,SIFT1M reduced target dataset,true\n"
+        "sift1m_query,AVAILABLE,sift_query.fvecs,official,SIFT1M reduced target query,true\n"
+        "sift1m_groundtruth,AVAILABLE,sift_groundtruth.ivecs,official,SIFT1M reduced target ground truth,true\n"
+        "dataset_Paper,NEEDS_INPUT,,PAPER_EVIDENCE.md,"
+        "Internal corpus; may not be publicly available,true\n",
+        encoding="utf-8",
+    )
+    staging = reviewer_staging_dir(tmp_path, 1, 1)
+    started = time.time()
+    _write_valid_reviewer_candidate(staging, "PASS_REDUCED_ALIGNED")
+
+    metadata = validate_reviewer_transaction(
+        tmp_path,
+        staging,
+        {"success": True, "returncode": 0, "unexpected_modifications": []},
+        iteration=1,
+        attempt_started_at=started,
+    )
+
+    assert metadata["validation_status"] == "FAIL"
+    assert metadata["execution_status"] == "REVIEWER_INPUT_INTEGRITY_BLOCKED_L3"
+
+
 def test_reviewer_allowed_outputs_are_staging_only(tmp_path: Path) -> None:
     staging = reviewer_staging_dir(tmp_path, 2, 1)
     allowed = reviewer_allowed_outputs(tmp_path, staging)

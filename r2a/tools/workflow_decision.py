@@ -208,6 +208,8 @@ def aggregate_terminal_decision(
     repo = Path(str(state.get("repo_path", "") or "."))
     iteration = int(state.get("iteration", state.get("current_iteration", 1)) or 1)
     max_iterations = int(state.get("max_iterations", 1) or 1)
+    current_review_completed = _current_review_completed(state)
+    completed_review_iterations = count_completed_review_iterations(state)
     evidence = _evidence_summary(repo, state)
     raw_blockers = [
         *_paper_input_blockers(state),
@@ -216,7 +218,7 @@ def aggregate_terminal_decision(
         *_source_artifact_blockers(state, repo),
         *_engineer_backend_blockers(state),
     ]
-    if _post_review_phase(state) or state.get("engineer_status"):
+    if _workflow_evidence_phase(state):
         raw_blockers.extend(collect_workflow_blockers(state, repo))
         raw_blockers.extend(_manager_decision_blockers(repo))
     active_blockers = BlockerLedger(repo).update(_dedupe_normalized_blockers(raw_blockers), iteration)
@@ -398,13 +400,14 @@ def aggregate_terminal_decision(
     if converged:
         return converged
 
-    if not _post_review_phase(state):
+    if not current_review_completed:
         # Planner/Engineer 阶段，继续下一阶段
         return _decision(
             "continue_iteration",
             "READY_FOR_NEXT_STAGE",
             terminal=False,
             iteration=iteration,
+            completed_review_iterations=completed_review_iterations,
             active_blockers=active_blockers,
             evidence_summary=evidence,
             reason="No terminal workflow decision before the next stage.",
@@ -413,16 +416,17 @@ def aggregate_terminal_decision(
     # === Reviewer 已完成 ===
     # 根据 auto_iterate 和迭代次数决定下一步
 
-    if iteration >= max_iterations:
+    if completed_review_iterations >= max_iterations:
         # 达到最大迭代次数，正常结束
         # 使用 "final" 而不是 "stop_evidence_cap"
         return _decision(
             "final",
             "MAX_ITERATIONS_REACHED",
             iteration=iteration,
+            completed_review_iterations=completed_review_iterations,
             active_blockers=active_blockers,
             evidence_summary=evidence,
-            reason=f"Reached max_iterations ({max_iterations}); finalizing with current evidence level.",
+            reason=f"Reached max_iterations ({max_iterations}) after {completed_review_iterations} completed Reviewer cycle(s); finalizing with current evidence level.",
         )
 
     if not state.get("auto_iterate", False):
@@ -432,6 +436,7 @@ def aggregate_terminal_decision(
             "final",
             "AUTO_ITERATE_DISABLED",
             iteration=iteration,
+            completed_review_iterations=completed_review_iterations,
             active_blockers=active_blockers,
             evidence_summary=evidence,
             reason="Auto iteration is disabled; finalizing with current evidence level.",
@@ -443,9 +448,10 @@ def aggregate_terminal_decision(
         "READY_FOR_NEXT_ITERATION",
         terminal=False,
         iteration=iteration,
+        completed_review_iterations=completed_review_iterations,
         active_blockers=active_blockers,
         evidence_summary=evidence,
-        reason=f"Iteration {iteration} completed; continuing to iteration {iteration + 1}.",
+        reason=f"Reviewer cycle {completed_review_iterations} completed; continuing to iteration {iteration + 1}.",
     )
 
 
@@ -490,6 +496,7 @@ def _decision(
     iteration: int,
     active_blockers: list[dict[str, Any]],
     evidence_summary: dict[str, Any],
+    completed_review_iterations: int | None = None,
     reason: str = "",
     required_inputs: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -505,6 +512,7 @@ def _decision(
         "retryable": bool(retryable),
         "source": DECISION_SOURCE,
         "iteration": int(iteration),
+        "completed_review_iterations": int(completed_review_iterations or 0),
         "active_blockers": blockers,
         "active_blocker_ids": [str(blocker.get("blocker_id", "")) for blocker in blockers if str(blocker.get("blocker_id", "")).strip()],
         "required_inputs": list(required_inputs or []),
@@ -539,13 +547,7 @@ def _evidence_summary(repo: Path, state: dict[str, Any]) -> dict[str, Any]:
     target_level = normalize_level(final_decision.get("target_level", state.get("target_reproduction_level", "L4_reduced_paper_aligned")), "L4_reduced_paper_aligned")
 
     # 检查 Reviewer 是否已执行
-    reviewer_executed = bool(
-        state.get("reviewer_executed")
-        or state.get("reviewer_verdict")
-        or state.get("structured_review_feedback")
-        or state.get("latest_review_feedback_path")
-        or state.get("review_feedback_path")
-    )
+    reviewer_executed = _current_review_completed(state)
 
     # 如果 Reviewer 未执行或正式判定无效，accepted_level 为 UNASSESSED。
     if accepted_level == "UNASSESSED" or not reviewer_executed:
@@ -836,16 +838,69 @@ def _stopped_for_non_backend_failure(state: dict[str, Any]) -> bool:
     return bool(reason and not _looks_like_backend_reason(reason) and reason != "human_approval_rejected")
 
 
-def _post_review_phase(state: dict[str, Any]) -> bool:
+def count_completed_review_iterations(state: dict[str, Any]) -> int:
+    completed = _history_completed_review_iterations(state)
+    if _current_review_completed(state):
+        current_iteration = _state_iteration(state)
+        if not completed:
+            return current_iteration
+        completed.add(current_iteration)
+    return len(completed)
+
+
+def _history_completed_review_iterations(state: dict[str, Any]) -> set[int]:
+    completed: set[int] = set()
+    history = state.get("iteration_history") or state.get("iterations") or []
+    if not isinstance(history, list):
+        return completed
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        if not _history_entry_has_review(item):
+            continue
+        try:
+            iteration = int(item.get("iteration", 0) or 0)
+        except (TypeError, ValueError):
+            iteration = 0
+        if iteration > 0:
+            completed.add(iteration)
+    return completed
+
+
+def _history_entry_has_review(item: dict[str, Any]) -> bool:
+    if str(item.get("reviewer_verdict", "") or "").strip():
+        return True
+    for key in ("review_report", "review_feedback", "review_verdict"):
+        if str(item.get(key, "") or "").strip():
+            return True
+    missing = set(str(value) for value in item.get("archive_missing_files", []) or [])
+    return "review_report" not in missing and "review_feedback" not in missing and bool(item.get("task_spec"))
+
+
+def _current_review_completed(state: dict[str, Any]) -> bool:
     return bool(
         state.get("reviewer_executed")
-        or state.get("reviewer_verdict")
+        or str(state.get("reviewer_verdict", "") or "").strip()
         or state.get("structured_review_feedback")
-        or state.get("latest_review_feedback_path")
-        or state.get("review_feedback_path")
+        or str(state.get("review_report_path", "") or "").strip()
+        or str(state.get("review_feedback_path", "") or "").strip()
+    )
+
+
+def _workflow_evidence_phase(state: dict[str, Any]) -> bool:
+    return bool(
+        _current_review_completed(state)
+        or state.get("engineer_status")
         or state.get("manager_executed")
         or state.get("manager_status")
     )
+
+
+def _state_iteration(state: dict[str, Any]) -> int:
+    try:
+        return max(1, int(state.get("iteration", state.get("current_iteration", 1)) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _normalize_blocker_type(raw_id: str, blocker: dict[str, Any]) -> str:

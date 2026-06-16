@@ -170,6 +170,46 @@ def test_optional_full_benchmark_datasets_do_not_block_reduced_l3_l4(tmp_path: P
     }
 
 
+def test_paper_reference_dataset_missing_is_warning_not_blocker(tmp_path: Path) -> None:
+    _write_input_contract(
+        tmp_path,
+        _reduced_core_rows()
+        + "dataset_Paper,NEEDS_INPUT,,PAPER_EVIDENCE.md,"
+        "2,029,997 vectors, 200 dim, 12 predicates. Internal corpus; may not be publicly available.\n",
+    )
+
+    summary = summarize_official_input_integrity(tmp_path)
+
+    assert summary["has_blocking_issue"] is False
+    assert summary["missing_or_invalid_inputs"] == []
+    assert len(summary["warnings"]) == 1
+    assert summary["warnings"][0]["component"] == "dataset_Paper"
+    assert summary["warnings"][0]["severity"] == "warning"
+    assert summary["warnings"][0]["target_required"] is False
+
+
+def test_explicit_target_required_paper_dataset_still_blocks(tmp_path: Path) -> None:
+    results = tmp_path / ".r2a" / "results"
+    results.mkdir(parents=True)
+    (results / "input_contract_verification.csv").write_text(
+        "component,status,path_or_command,evidence_source,notes,target_required\n"
+        "sift1m_dataset,AVAILABLE,sift_base.fvecs,official,SIFT1M reduced target dataset,true\n"
+        "sift1m_query,AVAILABLE,sift_query.fvecs,official,SIFT1M reduced target query,true\n"
+        "sift1m_groundtruth,AVAILABLE,sift_groundtruth.ivecs,official,SIFT1M reduced target ground truth,true\n"
+        "dataset_Paper,NEEDS_INPUT,,PAPER_EVIDENCE.md,"
+        "Internal corpus; may not be publicly available,true\n",
+        encoding="utf-8",
+    )
+
+    summary = summarize_official_input_integrity(tmp_path)
+
+    assert summary["has_blocking_issue"] is True
+    assert any(
+        item["component"] == "dataset_Paper" and item["target_required"] is True
+        for item in summary["missing_or_invalid_inputs"]
+    )
+
+
 def test_core_dataset_missing_still_blocks_reduced_l3_l4(tmp_path: Path) -> None:
     _write_input_contract(tmp_path, _reduced_core_rows(dataset_status="NEEDS_INPUT"))
 

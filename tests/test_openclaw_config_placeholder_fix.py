@@ -1,24 +1,28 @@
-"""Tests for OpenClaw config path placeholder detection fix.
-
-This module tests the fix for the bug where /home/r2auser/.openclaw/openclaw.json
-was incorrectly rejected as a placeholder path.
-"""
+"""Tests for OpenClaw config path placeholder detection."""
 
 import pytest
 from r2a_web.app import _is_placeholder_config_path, _save_stage_model_defaults
+
+
+@pytest.fixture(autouse=True)
+def isolate_web_settings(tmp_path, monkeypatch):
+    import r2a_web.app as app
+
+    monkeypatch.setattr(app, "WEB_SETTINGS_PATH", tmp_path / "web_settings.json")
 
 
 class TestPlaceholderConfigPath:
     """Test placeholder config path detection."""
 
     def test_short_username_not_placeholder(self):
-        """Short WSL usernames like /home/r2auser/ should NOT be rejected as placeholder."""
+        """Short real WSL usernames like /home/x/ should NOT be rejected as placeholder."""
         # Real WSL paths with short usernames
-        assert not _is_placeholder_config_path("/home/r2auser/.openclaw/openclaw.json")
+        assert not _is_placeholder_config_path("/home/x/.openclaw/openclaw.json")
         assert not _is_placeholder_config_path("/home/a/.openclaw/openclaw.json")
         assert not _is_placeholder_config_path("/home/u/.openclaw/openclaw.json")
         assert not _is_placeholder_config_path("/home/dev/.openclaw/openclaw.json")
         assert not _is_placeholder_config_path("/home/user1/.openclaw/openclaw.json")
+        assert _is_placeholder_config_path("/home/r2auser/.openclaw/openclaw.json")
 
     def test_example_username_is_placeholder(self):
         """Example usernames like /home/user/ should be rejected as placeholder."""
@@ -56,8 +60,8 @@ class TestPlaceholderConfigPath:
 
     def test_wsl_unc_path_not_placeholder(self):
         """WSL UNC paths should NOT be rejected as placeholder."""
-        assert not _is_placeholder_config_path("\\\\wsl.localhost\\Ubuntu\\home\\r2auser\\.openclaw\\openclaw.json")
-        assert not _is_placeholder_config_path("\\\\wsl$\\Ubuntu\\home\\r2auser\\.openclaw\\openclaw.json")
+        assert not _is_placeholder_config_path("\\\\wsl.localhost\\Ubuntu\\home\\x\\.openclaw\\openclaw.json")
+        assert not _is_placeholder_config_path("\\\\wsl$\\Ubuntu\\home\\x\\.openclaw\\openclaw.json")
 
 
 class TestSaveStageModelDefaults:
@@ -76,7 +80,7 @@ class TestSaveStageModelDefaults:
         # Simulate successful detection
         detection_result = {
             "model_detection_source": "openclaw_wsl_config",
-            "model_detection_read_path": "\\\\wsl.localhost\\Ubuntu\\home\\r2auser\\.openclaw\\openclaw.json",
+            "model_detection_read_path": "\\\\wsl.localhost\\Ubuntu\\home\\x\\.openclaw\\openclaw.json",
             "model_options": [
                 {
                     "provider": "ai-coding-plan",
@@ -89,8 +93,8 @@ class TestSaveStageModelDefaults:
 
         result = _save_stage_model_defaults(
             selection,
-            openclaw_executable_path="/home/r2auser/.nvm/versions/node/v22.22.2/bin/openclaw",
-            openclaw_config_path="/home/r2auser/.openclaw/openclaw.json",
+            openclaw_executable_path="/home/x/.nvm/versions/node/v22.22.2/bin/openclaw",
+            openclaw_config_path="/home/x/.openclaw/openclaw.json",
             detection_result=detection_result,
         )
 
@@ -117,8 +121,8 @@ class TestSaveStageModelDefaults:
 
         result = _save_stage_model_defaults(
             selection,
-            openclaw_executable_path="/home/r2auser/.nvm/versions/node/v22.22.2/bin/openclaw",
-            openclaw_config_path="/home/r2auser/.openclaw/openclaw.json",
+            openclaw_executable_path="/home/x/.nvm/versions/node/v22.22.2/bin/openclaw",
+            openclaw_config_path="/home/x/.openclaw/openclaw.json",
             detection_result=detection_result,
         )
 
@@ -155,7 +159,7 @@ class TestSaveStageModelDefaults:
         assert result.get("error")
         assert "placeholder" in result["error"].lower()
 
-    def test_no_detection_result_saves_with_warning(self, tmp_path):
+    def test_no_detection_result_saves_real_path_with_warning(self, tmp_path):
         """If no detection result is provided for a real path, save it with a warning."""
         selection = {
             "planner": {
@@ -168,7 +172,7 @@ class TestSaveStageModelDefaults:
         result = _save_stage_model_defaults(
             selection,
             openclaw_executable_path="openclaw",
-            openclaw_config_path="/home/r2auser/.openclaw/openclaw.json",
+            openclaw_config_path="/home/x/.openclaw/openclaw.json",
             detection_result=None,
         )
 
@@ -187,7 +191,7 @@ class TestSaveStageModelDefaults:
 
         detection_result = {
             "model_detection_source": "openclaw_config",
-            "model_detection_read_path": "/home/r2auser/.openclaw/openclaw.json",
+            "model_detection_read_path": "/home/x/.openclaw/openclaw.json",
             "model_options": [],
             "model_detection_errors": [],
         }
@@ -195,7 +199,7 @@ class TestSaveStageModelDefaults:
         result = _save_stage_model_defaults(
             selection,
             openclaw_executable_path="openclaw",
-            openclaw_config_path="/home/r2auser/.openclaw/openclaw.json",
+            openclaw_config_path="/home/x/.openclaw/openclaw.json",
             detection_result=detection_result,
         )
 
@@ -210,8 +214,8 @@ class TestDetectionAndSaveConsistency:
     def test_wsl_path_detection_and_save_consistency(self, tmp_path):
         """WSL paths that work in detection should also work in save."""
         # This is the exact scenario from the bug report
-        wsl_config_path = "/home/r2auser/.openclaw/openclaw.json"
-        wsl_executable_path = "/home/r2auser/.nvm/versions/node/v22.22.2/bin/openclaw"
+        wsl_config_path = "/home/x/.openclaw/openclaw.json"
+        wsl_executable_path = "/home/x/.nvm/versions/node/v22.22.2/bin/openclaw"
 
         selection = {
             "planner": {
@@ -224,7 +228,7 @@ class TestDetectionAndSaveConsistency:
         # Simulate successful detection (like Refresh Models button)
         detection_result = {
             "model_detection_source": "openclaw_wsl_config",
-            "model_detection_read_path": "\\\\wsl.localhost\\Ubuntu\\home\\r2auser\\.openclaw\\openclaw.json",
+            "model_detection_read_path": "\\\\wsl.localhost\\Ubuntu\\home\\x\\.openclaw\\openclaw.json",
             "model_options": [
                 {
                     "provider": "ai-coding-plan",

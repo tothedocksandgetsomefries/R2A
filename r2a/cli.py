@@ -491,7 +491,7 @@ def _cli_final_summary(result: dict) -> str:
     text = report_path_value.read_text(encoding="utf-8", errors="replace")
     run_summary = _markdown_section(text, "Run Summary")
     executive = _markdown_section(text, "Executive Summary")
-    blockers = _markdown_section(text, "Blocking Reasons")
+    blockers = _markdown_section(text, "Blocking Reasons") or _markdown_section(text, "阻塞原因")
     level = _markdown_section(text, "Reproduction Level")
     if not run_summary and not executive and not level:
         return ""

@@ -123,6 +123,26 @@ def archive_current_iteration(state: R2AState) -> R2AState:
 def archive_final_iteration(state: R2AState) -> R2AState:
     repo = Path(state["repo_path"])
     iteration = int(state.get("iteration", 1))
+    if not _current_iteration_has_reviewer_cycle(state):
+        final_dir = runs_dir(repo) / "final"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        (final_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (final_dir / "results").mkdir(parents=True, exist_ok=True)
+        for key in FINAL_ITERATION_REPORT_KEYS:
+            source = report_path(repo, key)
+            if source.exists():
+                shutil.copy2(source, final_dir / source.name)
+        _copy_tree_contents(artifact_dir(repo) / "logs", final_dir / "logs")
+        _copy_tree_contents(repo / "results", final_dir / "results")
+        _copy_tree_contents(artifact_dir(repo) / "results", final_dir / "results")
+        updated = {
+            **state,
+            "final_archive_dir": str(final_dir),
+            "runs_dir": str(runs_dir(repo)),
+        }
+        write_iteration_state(updated)
+        return updated
+
     iter_dir = ensure_iteration_dirs(repo, iteration)
 
     for key in FINAL_ITERATION_REPORT_KEYS:
@@ -376,9 +396,12 @@ def write_iteration_state(state: R2AState) -> Path:
     elif current_level == UNASSESSED:
         current_level = ""  # 未评估
 
+    completed_review_iterations = _completed_review_iterations_count(state)
     data = {
         "run_id": state.get("run_id", ""),
         "current_iteration": int(state.get("iteration", 1)),
+        "current_iteration_complete": _current_iteration_has_reviewer_cycle(state),
+        "completed_review_iterations": completed_review_iterations,
         "max_iterations": int(state.get("max_iterations", 1)),
         "auto_iterate": bool(state.get("auto_iterate", False)),
         # 新字段：正式等级
@@ -421,6 +444,7 @@ def write_final_report(state: R2AState) -> Path:
     if not isinstance(state.get("decision_status"), dict) or not state.get("decision_status"):
         state = {**state, "decision_status": aggregate_terminal_decision(state)}
     history = state.get("iteration_history", [])
+    completed_review_iterations = _completed_review_iterations_count(state)
 
     final_decision = build_final_decision(state, write=True)
     user_hints = user_hints_from_state(state)
@@ -534,7 +558,7 @@ def write_final_report(state: R2AState) -> Path:
             "final_writer_summary": final_writer_metadata_markdown(final_writer_metadata),
             "final_narrative_cn": final_narrative_cn,
             "final_status": str(final_decision.get("final_status", "") or state.get("loop_status", "completed")),
-            "total_iterations": len(history) or int(state.get("iteration", 1)),
+            "total_iterations": completed_review_iterations,
             "stop_reason": display["stop_reason"],
             "final_verdict": display["final_verdict"],
             "detailed_status": display["detailed_status"],
@@ -2026,6 +2050,52 @@ def _iteration_entry(state: R2AState, iter_dir: Path) -> dict[str, Any]:
         "ai_stages_used": _ai_stages_used(state),
         "summary": state.get("final_report", ""),
     }
+
+
+def _current_iteration_has_reviewer_cycle(state: R2AState) -> bool:
+    return bool(
+        state.get("reviewer_executed")
+        or str(state.get("reviewer_verdict", "") or "").strip()
+        or str(state.get("review_report_path", "") or "").strip()
+        or str(state.get("review_feedback_path", "") or "").strip()
+        or state.get("structured_review_feedback")
+    )
+
+
+def _completed_review_iterations_count(state: R2AState) -> int:
+    completed: set[int] = set()
+    history = state.get("iteration_history", [])
+    if isinstance(history, list):
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            if not _history_entry_has_reviewer_cycle(item):
+                continue
+            try:
+                iteration = int(item.get("iteration", 0) or 0)
+            except (TypeError, ValueError):
+                iteration = 0
+            if iteration > 0:
+                completed.add(iteration)
+    if _current_iteration_has_reviewer_cycle(state):
+        try:
+            current_iteration = max(1, int(state.get("iteration", 1) or 1))
+        except (TypeError, ValueError):
+            current_iteration = 1
+        if not completed:
+            return current_iteration
+        completed.add(current_iteration)
+    return len(completed)
+
+
+def _history_entry_has_reviewer_cycle(item: dict[str, Any]) -> bool:
+    if str(item.get("reviewer_verdict", "") or "").strip():
+        return True
+    for key in ("review_report", "review_feedback", "review_verdict"):
+        if str(item.get(key, "") or "").strip():
+            return True
+    missing = set(str(value) for value in item.get("archive_missing_files", []) or [])
+    return "review_report" not in missing and "review_feedback" not in missing and bool(item.get("task_spec"))
 
 
 def _existing_archive_path(path: Path) -> str:
